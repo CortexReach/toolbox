@@ -2,7 +2,7 @@
 
 One-click installer for the [memory-lancedb-pro](https://github.com/CortexReach/memory-lancedb-pro) plugin.
 
-> [memory-lancedb-pro](https://github.com/CortexReach/memory-lancedb-pro) 插件的一键安装脚本，对新手友好，一个命令搞定所有事。
+> **[中文文档 →](README-CN.md)**
 
 ## Quick Start
 
@@ -22,41 +22,26 @@ bash setup-memory.sh
 
 ## What Problems Does It Solve?
 
-> 不管你是什么情况，跑一个命令就行，脚本自动判断。
-
 | Your situation | What the script does |
 |---|---|
 | Never installed | Fresh download → install deps → pick config → write to openclaw.json → restart |
 | Installed via `git clone`, stuck on old commit | Auto `git fetch` + `checkout` to latest → reinstall deps → verify |
 | Installed via `npm` | Skip git update, remind you to `npm update` yourself |
 | Already up to date | Run health checks only, no changes |
-| Config has invalid fields (the 4-field bug) | Auto-detect via schema filter, remove unsupported fields before writing (initial + post-toggle) |
+| Config has invalid fields | Auto-detect via schema filter, remove unsupported fields (initial + post-toggle) |
 | `openclaw` CLI broken due to invalid config | Fallback: read workspace path directly from `openclaw.json` file |
 | Don't know if default branch is `main` or `master` | Auto-detect from remote |
 | Plugin installed in `extensions/` instead of `plugins/` | Auto-detect from config or `find` |
 
-> 不管你是什么情况，跑一个命令就行，脚本自动判断。
-
-| 你的情况 | 脚本做什么 |
-|---|---|
-| 啥都没装过 | 全新下载 → 装依赖 → 选配置 → 写入 → 重启 |
-| 之前 git clone 装的，停在旧版本 | 自动 fetch + checkout 到最新 → 重装依赖 → 检查 |
-| npm 装的 | 跳过 git 更新，提示你 `npm update` |
-| 已是最新 | 只跑健康检查，不改任何东西 |
-| 配置有非法字段（4 字段 bug） | 按插件 schema 自动裁掉，初始写入和可选功能开启后都会过滤 |
-| openclaw CLI 因配置损坏无法使用 | 兜底：直接从 JSON 文件读 workspace |
-| 不知道默认分支叫 main 还是 master | 自动检测 |
-| 插件装在 extensions/ 而不是 plugins/ | 自动探测 |
-
 ## Usage
 
 ```bash
-bash setup-memory.sh                    # Install or upgrade / 安装或升级
-bash setup-memory.sh --dry-run          # Preview only / 只预览不执行
-bash setup-memory.sh --beta             # Include pre-release versions / 包含 beta 版本
-bash setup-memory.sh --ref v1.2.0       # Lock to specific version / 锁定到指定版本
-bash setup-memory.sh --selfcheck-only   # Capability check only / 只跑能力自检
-bash setup-memory.sh --uninstall        # Revert config and remove plugin / 还原配置并移除
+bash setup-memory.sh                    # Install or upgrade
+bash setup-memory.sh --dry-run          # Preview only
+bash setup-memory.sh --beta             # Include pre-release versions
+bash setup-memory.sh --ref v1.2.0       # Lock to specific version
+bash setup-memory.sh --selfcheck-only   # Capability check only
+bash setup-memory.sh --uninstall        # Revert config and remove plugin
 ```
 
 ## How It Works
@@ -80,7 +65,7 @@ bash setup-memory.sh
  │  ── All users ──
  ├─ Restart Gateway
  ├─ Health checks (3/3)
- └─ Config overview
+ └─ Config overview + optional feature toggles
 ```
 
 ## Key Features
@@ -91,8 +76,6 @@ bash setup-memory.sh
 - **Workspace fallback** — works even when `openclaw` CLI is broken by invalid config
 - **Plugin path detection** — finds your plugin in `extensions/`, `plugins/`, or custom dirs
 - **Multi-provider** — presets for Jina / DashScope / SiliconFlow / OpenAI / Ollama, or any OpenAI-compatible API
-
-Or enter any OpenAI-compatible API endpoint manually.
 
 ## Files
 
@@ -116,7 +99,7 @@ Or enter any OpenAI-compatible API endpoint manually.
 |----|----------|--------|
 | Linux (Docker arm64) | OpenClaw container | pass |
 | macOS | Terminal / iTerm2 | pass |
-| Windows WSL | Windows Terminal | pass (known issue in v2.0 fixed in v3.2) |
+| Windows WSL | Windows Terminal | pass |
 
 ## Changelog
 
