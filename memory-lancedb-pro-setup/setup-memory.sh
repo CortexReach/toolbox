@@ -142,39 +142,36 @@ needs_update() {
 get_remote_version() {
   local ver=""
 
-  if $INCLUDE_BETA; then
-    ver=$(node -e "
-      fetch('https://api.github.com/repos/$GITHUB_REPO/tags?per_page=30')
-        .then(r => r.json())
-        .then(tags => {
-          if (!Array.isArray(tags) || tags.length === 0) { console.log(''); return; }
-          const parsed = tags.map(t => {
-            const v = (t.name || '').replace(/^v/, '');
-            const [core, pre] = v.split('-');
-            const nums = (core || '').split('.').map(Number);
-            const preNum = pre ? parseInt((pre.match(/\d+$/) || ['0'])[0]) : Infinity;
-            return { v, nums, preNum, hasPre: !!pre };
-          });
-          parsed.sort((a, b) => {
-            for (let i = 0; i < 3; i++) {
-              if ((a.nums[i]||0) !== (b.nums[i]||0)) return (b.nums[i]||0) - (a.nums[i]||0);
-            }
-            if (!a.hasPre && b.hasPre) return -1;
-            if (a.hasPre && !b.hasPre) return 1;
-            return b.preNum - a.preNum;
-          });
-          console.log(parsed[0]?.v || '');
-        })
-        .catch(() => console.log(''));
-    " 2>/dev/null)
-  else
-    ver=$(node -e "
-      fetch('https://api.github.com/repos/$GITHUB_REPO/releases/latest')
-        .then(r => r.json())
-        .then(d => console.log((d.tag_name || '').replace(/^v/, '')))
-        .catch(() => console.log(''));
-    " 2>/dev/null)
-  fi
+  # 统一用 tags API 获取最新版本（releases/latest 可能滞后于 master HEAD）
+  local include_pre="$INCLUDE_BETA"
+  ver=$(INCLUDE_PRE="$include_pre" node -e "
+    const includePre = process.env.INCLUDE_PRE === 'true';
+    fetch('https://api.github.com/repos/$GITHUB_REPO/tags?per_page=30')
+      .then(r => r.json())
+      .then(tags => {
+        if (!Array.isArray(tags) || tags.length === 0) { console.log(''); return; }
+        const parsed = tags.map(t => {
+          const v = (t.name || '').replace(/^v/, '');
+          const [core, pre] = v.split('-');
+          const nums = (core || '').split('.').map(Number);
+          const preNum = pre ? parseInt((pre.match(/\d+\$/) || ['0'])[0]) : Infinity;
+          return { v, nums, preNum, hasPre: !!pre };
+        });
+        // 不含 beta 时优先找正式版，全是 beta 则退而取最新 beta
+        let candidates = includePre ? parsed : parsed.filter(p => !p.hasPre);
+        if (candidates.length === 0) candidates = parsed;
+        candidates.sort((a, b) => {
+          for (let i = 0; i < 3; i++) {
+            if ((a.nums[i]||0) !== (b.nums[i]||0)) return (b.nums[i]||0) - (a.nums[i]||0);
+          }
+          if (!a.hasPre && b.hasPre) return -1;
+          if (a.hasPre && !b.hasPre) return 1;
+          return b.preNum - a.preNum;
+        });
+        console.log(candidates[0]?.v || '');
+      })
+      .catch(() => console.log(''));
+  " 2>/dev/null)
 
   # fallback：git ls-remote
   if [[ -z "$ver" ]]; then
@@ -567,6 +564,7 @@ info "第 3 步：检测已安装版本 / Detecting installed version..."
 FRESH_INSTALL=true
 LOCAL_VER="0.0.0"
 UPGRADE_DONE=false
+PLUGIN_MANIFEST="$PLUGIN_DIR/openclaw.plugin.json"
 
 if [[ -d "$PLUGIN_DIR" && -f "$PLUGIN_DIR/package.json" ]]; then
   FRESH_INSTALL=false
@@ -1198,7 +1196,6 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
   fi
 
   # ── 第 9.5 步：Schema 动态过滤 ──
-  PLUGIN_MANIFEST="$PLUGIN_DIR/openclaw.plugin.json"
 
   filter_config_by_schema() {
     local CONFIG_JSON_INPUT="$1"
@@ -1387,10 +1384,15 @@ if $NEED_GATEWAY_RESTART; then
   if $DRY_RUN; then
     dry "openclaw gateway restart"
   else
-    if openclaw gateway restart 2>&1; then
-      success "Gateway 重启完成 / Gateway restarted"
+    RESTART_OUT=$(openclaw gateway restart 2>&1) || true
+    if echo "$RESTART_OUT" | grep -qiE 'disabled|unavailable|not found|error|failed'; then
+      echo "$RESTART_OUT"
+      warn "Gateway 未能正常重启 / Gateway restart may have failed."
+      echo "    容器内请手动前台启动 / In containers, start in foreground:"
+      echo "    openclaw gateway start --foreground"
     else
-      warn "重启可能失败 / Restart may have failed. Try: openclaw gateway restart"
+      echo "$RESTART_OUT"
+      success "Gateway 重启完成 / Gateway restarted"
     fi
   fi
 fi
@@ -1738,10 +1740,15 @@ if [[ "$PASS" -eq "$TOTAL" ]] && ! $DRY_RUN; then
 
           echo ""
           info "配置已更新，重启 Gateway / Config updated, restarting Gateway..."
-          if openclaw gateway restart 2>&1; then
-            success "Gateway 重启完成 / Gateway restarted."
+          RESTART_OUT2=$(openclaw gateway restart 2>&1) || true
+          if echo "$RESTART_OUT2" | grep -qiE 'disabled|unavailable|not found|error|failed'; then
+            echo "$RESTART_OUT2"
+            warn "Gateway 未能正常重启 / Gateway restart may have failed."
+            echo "    容器内请手动前台启动 / In containers, start in foreground:"
+            echo "    openclaw gateway start --foreground"
           else
-            warn "重启可能失败 / Restart may have failed. Try: openclaw gateway restart"
+            echo "$RESTART_OUT2"
+            success "Gateway 重启完成 / Gateway restarted."
           fi
         else
           echo ""
