@@ -465,8 +465,24 @@ if ! $SELFCHECK_ONLY && command -v jq &>/dev/null; then
   HAS_JQ=true
   success "jq 已找到（将自动合并配置）/ jq found (auto-merge enabled)"
 elif ! $SELFCHECK_ONLY; then
-  warn "未安装 jq — 需手动编辑配置 / jq not found — manual config editing required"
-  echo "     安装 jq 可全自动 / Install jq for auto mode: brew install jq (Mac) or apt install jq (Linux)"
+  echo ""
+  warn "═══ 强烈建议先装 jq 再跑本脚本 / Strongly recommend installing jq first ═══"
+  echo ""
+  echo "    没有 jq 的影响 / Without jq:"
+  echo "    ✗ 配置需要手动编辑（容易写错）/ Config must be edited manually (error-prone)"
+  echo "    ✗ 看不到配置全景 / Cannot display config overview"
+  echo "    ✗ 可选功能无法自动开启 / Optional features cannot be toggled automatically"
+  echo ""
+  echo "    安装一行命令 / Install with one command:"
+  echo "    Mac:   brew install jq"
+  echo "    Linux: sudo apt install jq"
+  echo ""
+  read -p "    继续无 jq 模式？/ Continue without jq? (y/n) [n]: " CONTINUE_NO_JQ
+  CONTINUE_NO_JQ=${CONTINUE_NO_JQ:-n}
+  if [[ ! "$CONTINUE_NO_JQ" =~ ^[yY]$ ]]; then
+    info "请安装 jq 后重跑 / Install jq and re-run. Exiting."
+    exit 0
+  fi
 fi
 
 # ── 第 2 步：确认 workspace ──
