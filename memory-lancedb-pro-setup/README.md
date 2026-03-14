@@ -30,7 +30,7 @@ bash setup-memory.sh
 | Installed via `git clone`, stuck on old commit | Auto `git fetch` + `checkout` to latest → reinstall deps → verify |
 | Installed via `npm` | Skip git update, remind you to `npm update` yourself |
 | Already up to date | Run health checks only, no changes |
-| Config has invalid fields (the 4-field bug) | Auto-detect via schema filter, remove unsupported fields before writing |
+| Config has invalid fields (the 4-field bug) | Auto-detect via schema filter, remove unsupported fields before writing (initial + post-toggle) |
 | `openclaw` CLI broken due to invalid config | Fallback: read workspace path directly from `openclaw.json` file |
 | Don't know if default branch is `main` or `master` | Auto-detect from remote |
 | Plugin installed in `extensions/` instead of `plugins/` | Auto-detect from config or `find` |
@@ -43,7 +43,7 @@ bash setup-memory.sh
 | 之前 git clone 装的，停在旧版本 | 自动 fetch + checkout 到最新 → 重装依赖 → 检查 |
 | npm 装的 | 跳过 git 更新，提示你 `npm update` |
 | 已是最新 | 只跑健康检查，不改任何东西 |
-| 配置有非法字段（4 字段 bug） | 按插件 schema 自动裁掉，告诉你裁了什么 |
+| 配置有非法字段（4 字段 bug） | 按插件 schema 自动裁掉，初始写入和可选功能开启后都会过滤 |
 | openclaw CLI 因配置损坏无法使用 | 兜底：直接从 JSON 文件读 workspace |
 | 不知道默认分支叫 main 还是 master | 自动检测 |
 | 插件装在 extensions/ 而不是 plugins/ | 自动探测 |
@@ -85,7 +85,7 @@ bash setup-memory.sh
 
 ## Key Features
 
-- **Schema filter** — auto-remove unsupported config fields before writing, no more `additional properties` errors
+- **Schema filter** — auto-remove unsupported config fields both on initial write and after toggling optional features, no more `additional properties` errors
 - **Git auto-update** — existing git repos auto fetch + checkout to latest, detects `main` vs `master`
 - **Version locking** — `--ref v1.2.0` to pin a specific version
 - **Workspace fallback** — works even when `openclaw` CLI is broken by invalid config
@@ -98,7 +98,7 @@ Or enter any OpenAI-compatible API endpoint manually.
 
 | File | Description |
 |------|-------------|
-| `setup-memory.sh` | Main installer script (v3.2) |
+| `setup-memory.sh` | Main installer script (v3.3) |
 | `scripts/memory-selfcheck.mjs` | Capability self-check (embedding & rerank probe) |
 | `scripts/probe-endpoint.mjs` | Universal OpenAI-compatible API endpoint probe (v3.0+) |
 | `scripts/config-validate.mjs` | Post-install config field validation (v3.0+) |
@@ -119,6 +119,10 @@ Or enter any OpenAI-compatible API endpoint manually.
 | Windows WSL | Windows Terminal | pass (known issue in v2.0 fixed in v3.2) |
 
 ## Changelog
+
+### v3.3 (2026-03-14)
+- Fix: run schema filter again before gateway restart after optional feature toggles (autoRecall/reflection/rerank/mdMirror wrote fields that bypassed the v3.1 initial filter)
+- Ollama/local model users selecting rerank are now prompted for a Jina API Key or can skip (previously wrote `"ollama"` as rerankApiKey which doesn't work)
 
 ### v3.2 (2026-03-14)
 - Git auto-update: existing git repos auto `fetch` + `checkout` to target ref
