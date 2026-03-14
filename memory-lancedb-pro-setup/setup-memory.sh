@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-#  memory-lancedb-pro 一键安装 / 升级脚本 v3.0
+#  memory-lancedb-pro 一键安装 / 升级脚本 v3.2
 #
 #  用法：
 #    bash setup-memory.sh            # 安装（已安装则进入升级模式）
@@ -8,6 +8,16 @@
 #    bash setup-memory.sh --dry-run  # 只展示会做什么，不实际执行
 #    bash setup-memory.sh --selfcheck-only  # 只跑能力自检，不改配置
 #    bash setup-memory.sh --uninstall # 还原配置并移除插件
+#    bash setup-memory.sh --ref v1.2.0  # 锁定到指定 tag/branch/commit
+#
+#  v3.2 变化：
+#    - 已有 git clone 的插件目录自动 fetch + checkout 到目标 ref
+#    - npm 安装的用户不受影响（npm update 是用户自己管的）
+#
+#  v3.1 变化：
+#    - --ref 参数：锁定 clone 版本（tag/branch/commit），默认 main
+#    - Schema 动态过滤：写入配置前按插件 configSchema 自动裁剪非法字段
+#    - 写入前双重校验：过滤前后各验一次 JSON 合法性
 #
 #  v3.0 变化：
 #    - 通用端口探测：支持任意 OpenAI 兼容 API
@@ -37,13 +47,24 @@ DRY_RUN=false
 UNINSTALL=false
 SELFCHECK_ONLY=false
 INCLUDE_BETA=false
-for arg in "$@"; do
-  case "$arg" in
+PLUGIN_REF=""  # 空表示"跟随远程默认分支"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
     --dry-run)   DRY_RUN=true ;;
     --uninstall) UNINSTALL=true ;;
     --selfcheck-only) SELFCHECK_ONLY=true ;;
     --beta)      INCLUDE_BETA=true ;;
+    --ref)
+      shift
+      if [[ $# -le 0 ]]; then
+        echo "[ERR]  --ref 需要一个 tag / branch / commit 参数" >&2
+        exit 1
+      fi
+      PLUGIN_REF="$1"
+      ;;
+    --ref=*) PLUGIN_REF="${1#*=}" ;;
   esac
+  shift
 done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -70,7 +91,7 @@ dry()     { echo -e "${YELLOW}[DRY-RUN]${NC} 将会执行: $1"; }
 
 echo ""
 echo -e "${BOLD}========================================${NC}"
-echo -e "${BOLD}  memory-lancedb-pro 安装 / 升级向导 v3.0${NC}"
+echo -e "${BOLD}  memory-lancedb-pro 安装 / 升级向导 v3.2${NC}"
 echo -e "${BOLD}========================================${NC}"
 if $DRY_RUN; then
   echo -e "${YELLOW}  ⚡ DRY-RUN 模式：只展示操作，不实际执行${NC}"
@@ -372,6 +393,16 @@ if $UNINSTALL; then
   fi
 
   WORKSPACE=$(openclaw config get agents.defaults.workspace 2>/dev/null | tr -d '"' | tr -d ' ' || echo "")
+  if [[ -z "$WORKSPACE" || ! -d "$WORKSPACE" ]] && [[ -f "$OPENCLAW_JSON" ]]; then
+    WORKSPACE=$(node -e "
+      try {
+        const d = JSON.parse(require('fs').readFileSync('$OPENCLAW_JSON','utf8'));
+        const w = d?.agents?.defaults?.workspace || '';
+        process.stdout.write(w.replace(/^~/, process.env.HOME || ''));
+      } catch(e) { process.stdout.write(''); }
+    " 2>/dev/null)
+  fi
+  [[ -z "$WORKSPACE" || ! -d "$WORKSPACE" ]] && for g in "$HOME/.openclaw/workspace" "$HOME/.openclaw-workspace"; do [[ -d "$g" ]] && WORKSPACE="$g" && break; done
   PLUGIN_DIR=$(detect_plugin_dir "$WORKSPACE" "$OPENCLAW_JSON")
   if [[ -d "$PLUGIN_DIR" ]]; then
     echo ""
@@ -434,6 +465,32 @@ if $SELFCHECK_ONLY; then
   success "selfcheck-only 模式跳过 workspace 检查"
 else
   WORKSPACE=$(openclaw config get agents.defaults.workspace 2>/dev/null | tr -d '"' | tr -d ' ' || echo "")
+  # fallback：openclaw config get 可能因 invalid config 失败，直接从 JSON 文件读
+  if [[ -z "$WORKSPACE" || ! -d "$WORKSPACE" ]]; then
+    OC_JSON="$HOME/.openclaw/openclaw.json"
+    if [[ -f "$OC_JSON" ]]; then
+      WORKSPACE=$(node -e "
+        try {
+          const d = JSON.parse(require('fs').readFileSync('$OC_JSON','utf8'));
+          const w = d?.agents?.defaults?.workspace || '';
+          process.stdout.write(w.replace(/^~/, process.env.HOME || ''));
+        } catch(e) { process.stdout.write(''); }
+      " 2>/dev/null)
+      if [[ -n "$WORKSPACE" && -d "$WORKSPACE" ]]; then
+        info "从 openclaw.json 文件直接读取 workspace（openclaw CLI 可能因配置问题不可用）"
+      fi
+    fi
+  fi
+  if [[ -z "$WORKSPACE" || ! -d "$WORKSPACE" ]]; then
+    # 最后兜底：常见默认路径
+    for guess in "$HOME/.openclaw/workspace" "$HOME/.openclaw-workspace"; do
+      if [[ -d "$guess" ]]; then
+        WORKSPACE="$guess"
+        info "自动探测到 workspace: $WORKSPACE"
+        break
+      fi
+    done
+  fi
   if [[ -z "$WORKSPACE" || ! -d "$WORKSPACE" ]]; then
     echo ""
     echo "  无法自动获取 workspace 路径。"
@@ -445,6 +502,52 @@ fi
 
 OPENCLAW_JSON="$HOME/.openclaw/openclaw.json"
 PLUGIN_DIR=$(detect_plugin_dir "$WORKSPACE" "$OPENCLAW_JSON")
+
+# ── 第 2.5 步：已有 git 仓库自动更新到目标 ref ──
+# 不管是升级路径还是全新安装，只要插件目录是 git 仓库就先拉到最新
+OLD_HEAD=""
+if ! $SELFCHECK_ONLY && [[ -d "$PLUGIN_DIR/.git" ]]; then
+  echo ""
+  info "检测到已有 git 仓库，自动更新 / Git repo detected, updating..."
+  # 如果没指定 --ref，自动检测远程默认分支（main 或 master）
+  if [[ -z "$PLUGIN_REF" ]]; then
+    PLUGIN_REF=$(git -C "$PLUGIN_DIR" remote show origin 2>/dev/null | grep 'HEAD branch' | awk '{print $NF}')
+    if [[ -z "$PLUGIN_REF" ]]; then
+      # fallback：看本地有 main 还是 master
+      if git -C "$PLUGIN_DIR" rev-parse --verify origin/main &>/dev/null; then
+        PLUGIN_REF="main"
+      else
+        PLUGIN_REF="master"
+      fi
+    fi
+    info "自动检测到默认分支 / Default branch: $PLUGIN_REF"
+  fi
+  OLD_HEAD=$(git -C "$PLUGIN_DIR" rev-parse --short HEAD 2>/dev/null || echo "unknown")
+  info "当前 HEAD: $OLD_HEAD → 目标 ref: $PLUGIN_REF"
+  if $DRY_RUN; then
+    dry "cd $PLUGIN_DIR && git fetch origin && git checkout $PLUGIN_REF && git pull origin $PLUGIN_REF"
+  else
+    if git -C "$PLUGIN_DIR" fetch origin 2>&1; then
+      if git -C "$PLUGIN_DIR" checkout "$PLUGIN_REF" 2>&1; then
+        # 分支才 pull，tag 不需要
+        if git -C "$PLUGIN_DIR" symbolic-ref HEAD 2>/dev/null; then
+          git -C "$PLUGIN_DIR" pull origin "$PLUGIN_REF" 2>&1 || warn "git pull 失败，但 checkout 成功"
+        fi
+        INSTALLED_REF=$(git -C "$PLUGIN_DIR" rev-parse --short HEAD 2>/dev/null || echo "$PLUGIN_REF")
+        if [[ "$OLD_HEAD" != "$INSTALLED_REF" ]]; then
+          success "已更新 / Updated: $OLD_HEAD → $INSTALLED_REF"
+          # 版本变了，依赖可能变了，后面需要重新 npm install
+        else
+          success "已是最新 / Already up to date: $INSTALLED_REF"
+        fi
+      else
+        warn "git checkout $PLUGIN_REF 失败，保持当前版本 $OLD_HEAD / checkout failed, keeping $OLD_HEAD"
+      fi
+    else
+      warn "git fetch 失败（网络问题？），保持当前版本 $OLD_HEAD / fetch failed, keeping $OLD_HEAD"
+    fi
+  fi
+fi
 
 # ── 第 3 步：检测已安装版本 ──
 echo ""
@@ -516,6 +619,22 @@ if ! $FRESH_INSTALL && ! $SELFCHECK_ONLY; then
     fi
   else
     success "本地版本 v$LOCAL_VER 已是最新（或比远程更新）/ Local version is up to date."
+  fi
+fi
+
+# ── 已安装用户：git 更新后重新安装依赖 ──
+if ! $FRESH_INSTALL && [[ -n "${OLD_HEAD:-}" ]] && [[ "$OLD_HEAD" != "$(git -C "$PLUGIN_DIR" rev-parse --short HEAD 2>/dev/null || echo "$OLD_HEAD")" ]]; then
+  echo ""
+  info "插件代码已更新，重新安装依赖 / Code updated, reinstalling dependencies..."
+  if $DRY_RUN; then
+    dry "cd $PLUGIN_DIR && npm install"
+  else
+    if ! (cd "$PLUGIN_DIR" && npm install --loglevel=warn 2>&1); then
+      warn "默认源失败，切换国内镜像..."
+      (cd "$PLUGIN_DIR" && npm install --loglevel=warn --registry https://registry.npmmirror.com 2>&1) \
+        || warn "npm install 失败，插件可能无法正常工作。请手动运行：cd $PLUGIN_DIR && npm install"
+    fi
+    success "依赖更新完成"
   fi
 fi
 
@@ -1005,20 +1124,26 @@ if $FRESH_INSTALL; then
   # ── 第 8 步：克隆插件 ──
   echo ""
   info "第 8 步：下载插件 / Downloading plugin..."
+  # 全新安装时如果没指定 --ref 且第 2.5 步没执行（目录不存在），给默认值
+  [[ -z "$PLUGIN_REF" ]] && PLUGIN_REF="master"
+  echo "  repo: $GITHUB_URL"
+  echo "  ref : $PLUGIN_REF"
 
   if [[ -d "$PLUGIN_DIR" ]]; then
-    warn "目录已存在，跳过 clone: $PLUGIN_DIR"
+    # 已有目录（git 更新已在第 2.5 步完成，npm 用户自己管）
+    success "插件目录已存在，跳过下载: $PLUGIN_DIR"
   elif $DRY_RUN; then
-    dry "git clone $GITHUB_URL $PLUGIN_DIR"
+    dry "git clone --branch $PLUGIN_REF --depth 1 $GITHUB_URL $PLUGIN_DIR"
   else
     mkdir -p "$(dirname "$PLUGIN_DIR")"
     info "正在下载，请稍候 / Downloading, please wait..."
-    if ! git clone --quiet "$GITHUB_URL" "$PLUGIN_DIR" 2>&1; then
+    if ! git clone --branch "$PLUGIN_REF" --depth 1 --quiet "$GITHUB_URL" "$PLUGIN_DIR" 2>&1; then
       warn "GitHub clone 失败，尝试国内镜像..."
-      git clone --quiet "https://ghproxy.com/$GITHUB_URL" "$PLUGIN_DIR" \
+      git clone --branch "$PLUGIN_REF" --depth 1 --quiet "https://ghproxy.com/$GITHUB_URL" "$PLUGIN_DIR" \
         || fail "镜像也失败了。请手动下载 zip 解压到 $PLUGIN_DIR 后重新运行脚本。"
     fi
-    success "插件下载完成"
+    INSTALLED_REF=$(git -C "$PLUGIN_DIR" rev-parse --short HEAD 2>/dev/null || echo "$PLUGIN_REF")
+    success "插件下载完成（ref: $PLUGIN_REF, HEAD: $INSTALLED_REF）"
   fi
 
   # ── 第 9 步：安装依赖 ──
@@ -1027,8 +1152,8 @@ if $FRESH_INSTALL; then
 
   if $DRY_RUN; then
     dry "cd $PLUGIN_DIR && npm install"
-  elif [[ -d "$PLUGIN_DIR/node_modules" ]]; then
-    warn "node_modules 已存在，跳过。"
+  elif [[ -d "$PLUGIN_DIR/node_modules" ]] && [[ -n "${OLD_HEAD:-}" ]] && [[ "${OLD_HEAD:-}" == "${INSTALLED_REF:-}" ]]; then
+    warn "node_modules 已存在且版本未变，跳过。"
   else
     info "正在安装依赖，请稍候..."
     if ! (cd "$PLUGIN_DIR" && npm install --loglevel=warn 2>&1); then
@@ -1037,6 +1162,77 @@ if $FRESH_INSTALL; then
         || fail "npm install 失败。请手动运行：cd $PLUGIN_DIR && npm install --registry https://registry.npmmirror.com"
     fi
     success "依赖安装完成"
+  fi
+
+  # ── 第 9.5 步：Schema 动态过滤 ──
+  PLUGIN_MANIFEST="$PLUGIN_DIR/openclaw.plugin.json"
+
+  filter_config_by_schema() {
+    local CONFIG_JSON_INPUT="$1"
+    local MANIFEST_PATH="$2"
+
+    [[ -f "$MANIFEST_PATH" ]] || { warn "找不到插件 manifest：$MANIFEST_PATH"; return 1; }
+
+    CONFIG_JSON_ENV="$CONFIG_JSON_INPUT" MANIFEST_PATH_ENV="$MANIFEST_PATH" node - <<'NODE'
+const fs = require('fs');
+const manifest = JSON.parse(fs.readFileSync(process.env.MANIFEST_PATH_ENV, 'utf8'));
+const config = JSON.parse(process.env.CONFIG_JSON_ENV);
+const removed = [];
+
+function walk(obj, schema, path) {
+  if (!schema || typeof schema !== 'object') return obj;
+  if (obj === null || obj === undefined) return obj;
+  if (Array.isArray(obj)) return obj;
+  if (typeof obj !== 'object') return obj;
+
+  const props = schema.properties || {};
+  const allowAdditional = schema.additionalProperties !== false;
+  const out = {};
+
+  for (const [key, value] of Object.entries(obj)) {
+    if (Object.prototype.hasOwnProperty.call(props, key)) {
+      out[key] = walk(value, props[key], path ? `${path}.${key}` : key);
+    } else if (allowAdditional) {
+      out[key] = value;
+    } else {
+      removed.push(path ? `${path}.${key}` : key);
+    }
+  }
+  return out;
+}
+
+const filtered = walk(config, manifest.configSchema || {}, 'config');
+process.stdout.write(JSON.stringify({ filtered, removed }, null, 2));
+NODE
+  }
+
+  if ! $DRY_RUN && [[ -f "$PLUGIN_MANIFEST" ]]; then
+    # 过滤前校验
+    if ! CONFIG_JSON_ENV="$CONFIG_JSON" node -e 'JSON.parse(process.env.CONFIG_JSON_ENV)' >/dev/null 2>&1; then
+      fail "生成的插件配置不是合法 JSON（schema 过滤前），请检查模板生成逻辑。"
+    fi
+
+    FILTER_RESULT_JSON=$(filter_config_by_schema "$CONFIG_JSON" "$PLUGIN_MANIFEST") || true
+    if [[ -n "$FILTER_RESULT_JSON" ]]; then
+      CONFIG_JSON=$(FILTER_RESULT_JSON_ENV="$FILTER_RESULT_JSON" node -e \
+        "const d=JSON.parse(process.env.FILTER_RESULT_JSON_ENV);process.stdout.write(JSON.stringify(d.filtered,null,2));")
+      REMOVED_KEYS=$(FILTER_RESULT_JSON_ENV="$FILTER_RESULT_JSON" node -e \
+        "const d=JSON.parse(process.env.FILTER_RESULT_JSON_ENV);const r=d.removed||[];if(r.length)console.log(r.join(', '));" 2>/dev/null || echo "")
+      if [[ -n "$REMOVED_KEYS" ]]; then
+        warn "根据插件 schema 自动移除了不支持的字段 / Removed unsupported fields: $REMOVED_KEYS"
+      else
+        success "Schema 校验通过，所有字段合法 / All fields valid"
+      fi
+
+      # 过滤后校验
+      if ! CONFIG_JSON_ENV="$CONFIG_JSON" node -e 'JSON.parse(process.env.CONFIG_JSON_ENV)' >/dev/null 2>&1; then
+        fail "schema 过滤后的配置不是合法 JSON，请检查过滤逻辑。"
+      fi
+    else
+      warn "Schema 过滤执行失败，跳过过滤，使用原始配置 / Schema filter failed, using original config."
+    fi
+  elif ! $DRY_RUN; then
+    warn "未找到插件 manifest（$PLUGIN_MANIFEST），跳过 schema 过滤 / No manifest found, skipping schema filter."
   fi
 
   # ── 第 10 步：写入 openclaw.json ──
