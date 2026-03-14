@@ -571,6 +571,28 @@ fi
 
 OPENCLAW_JSON="$HOME/.openclaw/openclaw.json"
 PLUGIN_DIR=$(detect_plugin_dir "$WORKSPACE" "$OPENCLAW_JSON")
+PLUGIN_MANIFEST="$PLUGIN_DIR/openclaw.plugin.json"
+
+# ── 第 1.5 步：自动修复 additional properties（防止重启循环） ──
+if $HAS_JQ && [[ -f "$OPENCLAW_JSON" ]] && [[ -f "$PLUGIN_MANIFEST" ]]; then
+  CFG_CHECK_PATH='.plugins.entries["memory-lancedb-pro"].config'
+  CURRENT_CFG_CHECK=$(jq -r "$CFG_CHECK_PATH // empty" "$OPENCLAW_JSON" 2>/dev/null)
+  if [[ -n "$CURRENT_CFG_CHECK" && "$CURRENT_CFG_CHECK" != "null" ]]; then
+    REPAIR_RESULT=$(filter_config_by_schema "$CURRENT_CFG_CHECK" "$PLUGIN_MANIFEST") || true
+    if [[ -n "$REPAIR_RESULT" ]]; then
+      REPAIR_REMOVED=$(echo "$REPAIR_RESULT" | node -e "const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));const r=d.removed||[];if(r.length)console.log(r.join(', '));" 2>/dev/null || echo "")
+      if [[ -n "$REPAIR_REMOVED" ]]; then
+        warn "检测到非法字段，自动修复 / Invalid fields detected, auto-repairing: $REPAIR_REMOVED"
+        REPAIR_CFG=$(echo "$REPAIR_RESULT" | node -e "const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));process.stdout.write(JSON.stringify(d.filtered,null,2));" 2>/dev/null)
+        if [[ -n "$REPAIR_CFG" ]]; then
+          jq_safe_write "$CFG_CHECK_PATH = $REPAIR_CFG" "$OPENCLAW_JSON" \
+            && success "已自动清理非法字段 / Auto-repaired invalid config fields" \
+            || warn "自动修复写回失败 / Auto-repair write-back failed"
+        fi
+      fi
+    fi
+  fi
+fi
 
 # ── 第 2.5 步：已有 git 仓库自动更新到目标 ref ──
 # 不管是升级路径还是全新安装，只要插件目录是 git 仓库就先拉到最新
@@ -624,7 +646,6 @@ info "第 3 步：检测已安装版本 / Detecting installed version..."
 FRESH_INSTALL=true
 LOCAL_VER="0.0.0"
 UPGRADE_DONE=false
-PLUGIN_MANIFEST="$PLUGIN_DIR/openclaw.plugin.json"
 
 if [[ -d "$PLUGIN_DIR" && -f "$PLUGIN_DIR/package.json" ]]; then
   FRESH_INSTALL=false
