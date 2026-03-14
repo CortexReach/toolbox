@@ -57,7 +57,7 @@ while [[ $# -gt 0 ]]; do
     --ref)
       shift
       if [[ $# -le 0 ]]; then
-        echo "[ERR]  --ref 需要一个 tag / branch / commit 参数" >&2
+        echo "[ERR]  --ref 需要一个参数 / --ref requires a tag/branch/commit argument" >&2
         exit 1
       fi
       PLUGIN_REF="$1"
@@ -87,17 +87,17 @@ info()    { echo -e "${BLUE}[INFO]${NC} $1"; }
 success() { echo -e "${GREEN}[OK]${NC}   $1"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC} $1"; }
 fail()    { echo -e "${RED}[ERR]${NC}  $1"; exit 1; }
-dry()     { echo -e "${YELLOW}[DRY-RUN]${NC} 将会执行: $1"; }
+dry()     { echo -e "${YELLOW}[DRY-RUN]${NC} 将会执行 / Would run: $1"; }
 
 echo ""
 echo -e "${BOLD}========================================${NC}"
-echo -e "${BOLD}  memory-lancedb-pro 安装 / 升级向导 v3.2${NC}"
+echo -e "${BOLD}  memory-lancedb-pro 安装/升级向导 / Setup Wizard v3.2${NC}"
 echo -e "${BOLD}========================================${NC}"
 if $DRY_RUN; then
-  echo -e "${YELLOW}  ⚡ DRY-RUN 模式：只展示操作，不实际执行${NC}"
+  echo -e "${YELLOW}  ⚡ DRY-RUN 模式：只展示操作，不实际执行 / Show actions only, no changes${NC}"
 fi
 if $INCLUDE_BETA; then
-  echo -e "${CYAN}  🧪 BETA 模式：包含预发布版本${NC}"
+  echo -e "${CYAN}  🧪 BETA 模式：包含预发布版本 / Including pre-release versions${NC}"
 fi
 echo ""
 
@@ -248,7 +248,7 @@ upgrade_plugin() {
     warn "GitHub clone 失败，尝试镜像 / GitHub failed, trying mirror..."
     if ! git clone --depth 1 --quiet "https://ghproxy.com/$GITHUB_URL" "$tmp_dir/plugin" 2>&1; then
       rm -rf "$tmp_dir"
-      warn "下载失败，保持当前版本 $old_ver / Download failed, keeping v$old_ver"
+      warn "下载失败，保持当前版本 / Download failed, keeping v$old_ver"
       return 1
     fi
   fi
@@ -257,7 +257,7 @@ upgrade_plugin() {
     warn "npm install 失败，尝试镜像 / npm install failed, trying mirror..."
     if ! (cd "$tmp_dir/plugin" && npm install --loglevel=warn --registry https://registry.npmmirror.com 2>&1); then
       rm -rf "$tmp_dir"
-      warn "依赖安装失败，保持当前版本 $old_ver / Deps failed, keeping v$old_ver"
+      warn "依赖安装失败，保持当前版本 / Deps install failed, keeping v$old_ver"
       return 1
     fi
   fi
@@ -359,37 +359,37 @@ detect_plugin_dir() {
 
   # 3. 没找到 → 返回默认路径（新安装用）
   echo "$ws/plugins/memory-lancedb-pro"
-  return 1  # 返回 1 表示是猜测的默认值，没找到已有安装
+  return 0  # 默认路径，后续由 FRESH_INSTALL 逻辑判断是否需要全新安装
 }
 
 # ============================================================
 #  卸载流程
 # ============================================================
 if $UNINSTALL; then
-  info "进入卸载模式..."
+  info "进入卸载模式 / Entering uninstall mode..."
 
   OPENCLAW_JSON="$HOME/.openclaw/openclaw.json"
   if [[ ! -f "$OPENCLAW_JSON" ]]; then
-    fail "找不到 $OPENCLAW_JSON"
+    fail "找不到 / Not found: $OPENCLAW_JSON"
   fi
 
   LATEST_BACKUP=$(ls -t "$OPENCLAW_JSON".backup.* 2>/dev/null | head -1 || echo "")
 
   if [[ -n "$LATEST_BACKUP" ]]; then
     echo ""
-    echo "  找到备份文件：$LATEST_BACKUP"
-    echo "  备份时间：$(stat -f '%Sm' "$LATEST_BACKUP" 2>/dev/null || stat -c '%y' "$LATEST_BACKUP" 2>/dev/null || echo '未知')"
+    echo "  找到备份文件 / Found backup: $LATEST_BACKUP"
+    echo "  备份时间 / Backup time: $(stat -f '%Sm' "$LATEST_BACKUP" 2>/dev/null || stat -c '%y' "$LATEST_BACKUP" 2>/dev/null || echo '未知 / unknown')"
     echo ""
-    read -p "  要还原这个备份吗？(y/n) [y]: " RESTORE
+    read -p "  要还原这个备份吗？/ Restore this backup? (y/n) [y]: " RESTORE
     RESTORE=${RESTORE:-y}
     if [[ "$RESTORE" == "y" || "$RESTORE" == "Y" ]]; then
       cp "$OPENCLAW_JSON" "$OPENCLAW_JSON.before-uninstall.$(date +%Y%m%d_%H%M%S)"
       cp "$LATEST_BACKUP" "$OPENCLAW_JSON"
-      success "openclaw.json 已还原"
+      success "openclaw.json 已还原 / openclaw.json restored"
     fi
   else
-    warn "没有找到备份文件，跳过配置还原。"
-    echo "  如果要手动清理，请编辑 $OPENCLAW_JSON 删除 memory-lancedb-pro 相关配置。"
+    warn "没有找到备份文件，跳过配置还原 / No backup found, skipping config restore."
+    echo "  如果要手动清理，请编辑 / To clean up manually, edit $OPENCLAW_JSON"
   fi
 
   WORKSPACE=$(openclaw config get agents.defaults.workspace 2>/dev/null | tr -d '"' | tr -d ' ' || echo "")
@@ -406,21 +406,21 @@ if $UNINSTALL; then
   PLUGIN_DIR=$(detect_plugin_dir "$WORKSPACE" "$OPENCLAW_JSON")
   if [[ -d "$PLUGIN_DIR" ]]; then
     echo ""
-    read -p "  要删除插件目录 $PLUGIN_DIR 吗？(y/n) [n]: " DEL_PLUGIN
+    read -p "  要删除插件目录吗？/ Delete plugin dir $PLUGIN_DIR? (y/n) [n]: " DEL_PLUGIN
     DEL_PLUGIN=${DEL_PLUGIN:-n}
     if [[ "$DEL_PLUGIN" == "y" || "$DEL_PLUGIN" == "Y" ]]; then
       if [[ -d "$HOME/.Trash" ]]; then
         mv "$PLUGIN_DIR" "$HOME/.Trash/memory-lancedb-pro.$(date +%Y%m%d_%H%M%S)"
-        success "插件目录已移到废纸篓"
+        success "插件目录已移到废纸篓 / Plugin dir moved to Trash"
       else
         rm -rf "$PLUGIN_DIR"
-        success "插件目录已删除"
+        success "插件目录已删除 / Plugin dir deleted"
       fi
     fi
   fi
 
   echo ""
-  success "卸载完成。运行 openclaw gateway restart 使配置生效。"
+  success "卸载完成 / Uninstall complete. Run: openclaw gateway restart"
   exit 0
 fi
 
@@ -432,28 +432,28 @@ fi
 info "第 1 步：环境检查 / Environment check..."
 
 if ! command -v node &>/dev/null; then
-  fail "找不到 node。请先安装 Node.js（推荐 v18+）：https://nodejs.org"
+  fail "找不到 node / Node.js not found. Please install Node.js (v18+): https://nodejs.org"
 fi
 NODE_VER=$(node --version)
 success "Node.js $NODE_VER"
 
 if $SELFCHECK_ONLY; then
-  warn "--selfcheck-only 模式将跳过 OpenClaw / workspace / 插件安装，只做能力探测。"
+  warn "--selfcheck-only 模式：跳过安装，只做能力探测 / Skipping install, probe only."
 else
-  command -v openclaw >/dev/null 2>&1 || fail "找不到 openclaw 命令，请先安装 OpenClaw。"
-  success "openclaw CLI 已找到"
+  command -v openclaw >/dev/null 2>&1 || fail "找不到 openclaw 命令 / openclaw not found. Please install OpenClaw first."
+  success "openclaw CLI 已找到 / openclaw CLI found"
 
-  command -v npm &>/dev/null || fail "找不到 npm，请重新安装 Node.js。"
+  command -v npm &>/dev/null || fail "找不到 npm / npm not found. Please reinstall Node.js."
 fi
 
 # 检查 jq
 HAS_JQ=false
 if ! $SELFCHECK_ONLY && command -v jq &>/dev/null; then
   HAS_JQ=true
-  success "jq 已找到（将自动合并配置）"
+  success "jq 已找到（将自动合并配置）/ jq found (auto-merge enabled)"
 elif ! $SELFCHECK_ONLY; then
-  warn "未安装 jq — 配置文件需要手动编辑"
-  echo "     安装 jq 后可实现全自动：brew install jq（Mac）或 apt install jq（Linux）"
+  warn "未安装 jq — 需手动编辑配置 / jq not found — manual config editing required"
+  echo "     安装 jq 可全自动 / Install jq for auto mode: brew install jq (Mac) or apt install jq (Linux)"
 fi
 
 # ── 第 2 步：确认 workspace ──
@@ -462,7 +462,7 @@ info "第 2 步：确认 workspace 路径 / Confirm workspace..."
 
 if $SELFCHECK_ONLY; then
   WORKSPACE=""
-  success "selfcheck-only 模式跳过 workspace 检查"
+  success "selfcheck-only 模式跳过 workspace 检查 / Skipping workspace check"
 else
   WORKSPACE=$(openclaw config get agents.defaults.workspace 2>/dev/null | tr -d '"' | tr -d ' ' || echo "")
   # fallback：openclaw config get 可能因 invalid config 失败，直接从 JSON 文件读
@@ -477,7 +477,7 @@ else
         } catch(e) { process.stdout.write(''); }
       " 2>/dev/null)
       if [[ -n "$WORKSPACE" && -d "$WORKSPACE" ]]; then
-        info "从 openclaw.json 文件直接读取 workspace（openclaw CLI 可能因配置问题不可用）"
+        info "从 openclaw.json 直接读取 workspace / Read workspace from openclaw.json directly (CLI may be unavailable)"
       fi
     fi
   fi
@@ -486,16 +486,16 @@ else
     for guess in "$HOME/.openclaw/workspace" "$HOME/.openclaw-workspace"; do
       if [[ -d "$guess" ]]; then
         WORKSPACE="$guess"
-        info "自动探测到 workspace: $WORKSPACE"
+        info "自动探测到 workspace / Auto-detected workspace: $WORKSPACE"
         break
       fi
     done
   fi
   if [[ -z "$WORKSPACE" || ! -d "$WORKSPACE" ]]; then
     echo ""
-    echo "  无法自动获取 workspace 路径。"
-    read -p "  请手动输入你的 OpenClaw workspace 路径: " WORKSPACE
-    [[ -d "$WORKSPACE" ]] || fail "路径不存在：$WORKSPACE"
+    echo "  无法自动获取 workspace 路径 / Cannot auto-detect workspace path."
+    read -p "  请手动输入 OpenClaw workspace 路径 / Enter your OpenClaw workspace path: " WORKSPACE
+    [[ -d "$WORKSPACE" ]] || fail "路径不存在 / Path not found: $WORKSPACE"
   fi
   success "workspace: $WORKSPACE"
 fi
@@ -523,7 +523,7 @@ if ! $SELFCHECK_ONLY && [[ -d "$PLUGIN_DIR/.git" ]]; then
     info "自动检测到默认分支 / Default branch: $PLUGIN_REF"
   fi
   OLD_HEAD=$(git -C "$PLUGIN_DIR" rev-parse --short HEAD 2>/dev/null || echo "unknown")
-  info "当前 HEAD: $OLD_HEAD → 目标 ref: $PLUGIN_REF"
+  info "当前 / Current HEAD: $OLD_HEAD → 目标 / Target ref: $PLUGIN_REF"
   if $DRY_RUN; then
     dry "cd $PLUGIN_DIR && git fetch origin && git checkout $PLUGIN_REF && git pull origin $PLUGIN_REF"
   else
@@ -531,7 +531,7 @@ if ! $SELFCHECK_ONLY && [[ -d "$PLUGIN_DIR/.git" ]]; then
       if git -C "$PLUGIN_DIR" checkout "$PLUGIN_REF" 2>&1; then
         # 分支才 pull，tag 不需要
         if git -C "$PLUGIN_DIR" symbolic-ref HEAD 2>/dev/null; then
-          git -C "$PLUGIN_DIR" pull origin "$PLUGIN_REF" 2>&1 || warn "git pull 失败，但 checkout 成功"
+          git -C "$PLUGIN_DIR" pull origin "$PLUGIN_REF" 2>&1 || warn "git pull 失败，但 checkout 成功 / git pull failed, but checkout succeeded"
         fi
         INSTALLED_REF=$(git -C "$PLUGIN_DIR" rev-parse --short HEAD 2>/dev/null || echo "$PLUGIN_REF")
         if [[ "$OLD_HEAD" != "$INSTALLED_REF" ]]; then
@@ -613,11 +613,11 @@ if ! $FRESH_INSTALL && ! $SELFCHECK_ONLY; then
 
     if [[ "$DO_UPGRADE" =~ ^[yY]$ ]]; then
       if $DRY_RUN; then
-        dry "备份 $PLUGIN_DIR → ${PLUGIN_DIR}.backup.TIMESTAMP"
-        dry "git clone --depth 1 $GITHUB_URL → 临时目录"
+        dry "备份 / Backup $PLUGIN_DIR → ${PLUGIN_DIR}.backup.TIMESTAMP"
+        dry "git clone --depth 1 $GITHUB_URL → 临时目录 / temp dir"
         dry "npm install"
-        dry "替换插件目录"
-        success "DRY-RUN: 升级步骤展示完毕"
+        dry "替换插件目录 / Swap plugin directory"
+        success "DRY-RUN: 升级步骤展示完毕 / Upgrade steps displayed"
       else
         if upgrade_plugin "$PLUGIN_DIR" "$LOCAL_VER"; then
           UPGRADE_DONE=true
@@ -625,8 +625,8 @@ if ! $FRESH_INSTALL && ! $SELFCHECK_ONLY; then
         else
           echo ""
           echo "======================================================"
-          warn "升级未成功，当前仍在使用 v$LOCAL_VER"
-          info "旧版本运行正常，不影响使用，可以继续用。"
+          warn "升级未成功，仍在 v$LOCAL_VER / Upgrade unsuccessful, still on v$LOCAL_VER"
+          info "旧版本可正常使用 / Old version works fine, no impact."
           echo "======================================================"
         fi
       fi
@@ -646,11 +646,11 @@ if ! $FRESH_INSTALL && [[ -n "${OLD_HEAD:-}" ]] && [[ "$OLD_HEAD" != "$(git -C "
     dry "cd $PLUGIN_DIR && npm install"
   else
     if ! (cd "$PLUGIN_DIR" && npm install --loglevel=warn 2>&1); then
-      warn "默认源失败，切换国内镜像..."
+      warn "默认源失败，切换镜像 / Default registry failed, trying mirror..."
       (cd "$PLUGIN_DIR" && npm install --loglevel=warn --registry https://registry.npmmirror.com 2>&1) \
-        || warn "npm install 失败，插件可能无法正常工作。请手动运行：cd $PLUGIN_DIR && npm install"
+        || warn "npm install 失败 / npm install failed. Run manually: cd $PLUGIN_DIR && npm install"
     fi
-    success "依赖更新完成"
+    success "依赖更新完成 / Dependencies updated"
   fi
 fi
 
@@ -659,8 +659,8 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
 
   # selfcheck-only 提前退出
   if $SELFCHECK_ONLY && [[ ! -f "$SELF_CHECK_SCRIPT" ]]; then
-    warn "selfcheck 需要先安装插件。"
-    echo "  → 请先运行 bash setup-memory.sh 完成安装，再用 --selfcheck-only"
+    warn "selfcheck 需要先安装插件 / Plugin must be installed first for selfcheck."
+    echo "  → 请先运行 / Please run: bash setup-memory.sh"
     exit 1
   fi
 
@@ -672,15 +672,15 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
   echo ""
   echo -e "  ${BOLD}你的 embedding 服务是？/ Which embedding service?${NC}"
   echo ""
-  echo -e "  ── 快捷选择（自动填 URL）──"
-  echo -e "  ${BOLD}1) Jina${NC}              — 免费注册，embedding + rerank 一把梭 ${GREEN}← 推荐${NC}"
-  echo -e "  ${BOLD}2) 阿里云 DashScope${NC}  — 通义系列，国内快"
-  echo -e "  ${BOLD}3) SiliconFlow${NC}       — 国内加速，免费额度大"
-  echo -e "  ${BOLD}4) OpenAI${NC}            — 最省心但最贵"
+  echo -e "  ── 快捷选择（自动填 URL）/ Quick picks (auto-fill URL) ──"
+  echo -e "  ${BOLD}1) Jina${NC}              — 免费注册 / Free signup, embedding + rerank ${GREEN}← 推荐 / Recommended${NC}"
+  echo -e "  ${BOLD}2) 阿里云 DashScope${NC}  — 通义系列，国内快 / Tongyi, fast in China"
+  echo -e "  ${BOLD}3) SiliconFlow${NC}       — 国内加速，免费额度大 / China accelerated, generous free tier"
+  echo -e "  ${BOLD}4) OpenAI${NC}            — 最省心但最贵 / Easiest but priciest"
   echo ""
-  echo -e "  ── 通用入口 ──"
-  echo -e "  ${BOLD}5) Ollama / 本地模型${NC}  — 零成本，自动探测本地模型"
-  echo -e "  ${BOLD}6) 其他 OpenAI 兼容服务${NC} — 填 baseURL，自动探测"
+  echo -e "  ── 通用入口 / General ──"
+  echo -e "  ${BOLD}5) Ollama / 本地模型${NC}  — 零成本，自动探测 / Zero cost, auto-detect local models"
+  echo -e "  ${BOLD}6) 其他 OpenAI 兼容服务${NC} — 填 baseURL，自动探测 / Other OpenAI-compatible, auto-detect"
   echo ""
 
   PROVIDER=""
@@ -694,7 +694,7 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
   RERANK_PROVIDER=""
 
   while true; do
-    read -p "  输入数字 (1-6)，直接回车选 1: " PROVIDER_CHOICE
+    read -p "  输入数字 / Enter number (1-6), Enter for 1: " PROVIDER_CHOICE
     PROVIDER_CHOICE=${PROVIDER_CHOICE:-1}
     case "$PROVIDER_CHOICE" in
       1) PROVIDER="jina";       PROVIDER_PRESET="jina"; break ;;
@@ -703,7 +703,7 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
       4) PROVIDER="openai";     PROVIDER_PRESET="openai"; break ;;
       5) PROVIDER="ollama";     PROVIDER_PRESET="ollama"; break ;;
       6) PROVIDER="custom";     PROVIDER_PRESET=""; break ;;
-      *) warn "无效选择，请输入 1-6。" ;;
+      *) warn "无效选择，请输入 1-6 / Invalid, enter 1-6." ;;
     esac
   done
 
@@ -713,16 +713,16 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
     jina)
       API_BASE_URL="https://api.jina.ai/v1"
       echo ""
-      echo "  Jina 免费注册就能用：https://jina.ai/"
+      echo "  Jina 免费注册就能用 / Free signup: https://jina.ai/"
       echo ""
-      read -p "  请粘贴你的 Jina API Key（直接回车跳过）: " API_KEY
+      read -p "  请粘贴 Jina API Key（直接回车跳过）/ Paste your Jina API Key (Enter to skip): " API_KEY
       if [[ -z "$API_KEY" ]]; then
-        warn "未填写 Key，配置里保留占位符，记得之后替换。"
+        warn "未填写 Key，保留占位符 / No key entered, placeholder saved. Replace it later."
         API_KEY="YOUR_JINA_API_KEY"
       elif [[ "$API_KEY" != jina_* ]]; then
-        warn "Key 不是以 jina_ 开头，请确认是否正确。"
-        read -p "  继续？(y/n) [y]: " CONFIRM
-        [[ "${CONFIRM:-y}" =~ ^[yY]$ ]] || fail "用户取消。"
+        warn "Key 不以 jina_ 开头 / Key doesn't start with jina_, please verify."
+        read -p "  继续？/ Continue? (y/n) [y]: " CONFIRM
+        [[ "${CONFIRM:-y}" =~ ^[yY]$ ]] || fail "用户取消 / Cancelled by user."
       fi
       RERANK_ENDPOINT="https://api.jina.ai/v1/rerank"
       RERANK_API_KEY="$API_KEY"
@@ -733,11 +733,11 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
     dashscope)
       API_BASE_URL="https://dashscope.aliyuncs.com/compatible-mode/v1"
       echo ""
-      echo "  DashScope 控制台：https://dashscope.console.aliyun.com/"
+      echo "  DashScope 控制台 / Console: https://dashscope.console.aliyun.com/"
       echo ""
-      read -p "  请粘贴你的 DashScope API Key: " API_KEY
+      read -p "  请粘贴 DashScope API Key / Paste DashScope API Key: " API_KEY
       if [[ -z "$API_KEY" ]]; then
-        warn "未填写 Key，配置里保留占位符。"
+        warn "未填写 Key，保留占位符 / No key entered, placeholder saved."
         API_KEY="YOUR_API_KEY"
       fi
       RERANK_ENDPOINT="https://dashscope.aliyuncs.com/compatible-api/v1/reranks"
@@ -749,11 +749,11 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
     siliconflow)
       API_BASE_URL="https://api.siliconflow.cn/v1"
       echo ""
-      echo "  SiliconFlow 控制台：https://cloud.siliconflow.cn/"
+      echo "  SiliconFlow 控制台 / Console: https://cloud.siliconflow.cn/"
       echo ""
-      read -p "  请粘贴你的 SiliconFlow API Key: " API_KEY
+      read -p "  请粘贴 SiliconFlow API Key / Paste SiliconFlow API Key: " API_KEY
       if [[ -z "$API_KEY" ]]; then
-        warn "未填写 Key，配置里保留占位符。"
+        warn "未填写 Key，保留占位符 / No key entered, placeholder saved."
         API_KEY="YOUR_API_KEY"
       fi
       RERANK_ENDPOINT="https://api.siliconflow.cn/v1/rerank"
@@ -765,11 +765,11 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
     openai)
       API_BASE_URL="https://api.openai.com/v1"
       echo ""
-      echo "  OpenAI 控制台：https://platform.openai.com/api-keys"
+      echo "  OpenAI 控制台 / Console: https://platform.openai.com/api-keys"
       echo ""
-      read -p "  请粘贴你的 OpenAI API Key: " API_KEY
+      read -p "  请粘贴 OpenAI API Key / Paste OpenAI API Key: " API_KEY
       if [[ -z "$API_KEY" ]]; then
-        warn "未填写 Key，配置里保留占位符。"
+        warn "未填写 Key，保留占位符 / No key entered, placeholder saved."
         API_KEY="YOUR_API_KEY"
       fi
       # OpenAI 没有 rerank
@@ -777,23 +777,23 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
 
     ollama)
       echo ""
-      info "检测 Ollama 服务..."
+      info "检测 Ollama 服务 / Detecting Ollama service..."
 
       # 检测 Ollama 是否运行
       OLLAMA_RUNNING=false
       if curl -s --max-time 3 http://localhost:11434/api/version >/dev/null 2>&1; then
         OLLAMA_RUNNING=true
-        success "Ollama 服务正在运行"
+        success "Ollama 服务正在运行 / Ollama service is running"
       elif command -v ollama &>/dev/null; then
-        warn "Ollama 已安装但服务未运行。请先运行 'ollama serve'"
-        read -p "  已启动 Ollama？按回车继续，或 Ctrl+C 退出: "
+        warn "Ollama 已安装但未运行 / Ollama installed but not running. Run 'ollama serve' first."
+        read -p "  已启动 Ollama？按回车继续 / Ollama running? Press Enter to continue, Ctrl+C to exit: "
         if curl -s --max-time 3 http://localhost:11434/api/version >/dev/null 2>&1; then
           OLLAMA_RUNNING=true
         else
-          fail "Ollama 服务仍未响应。请先启动 Ollama 再重新运行脚本。"
+          fail "Ollama 服务仍未响应 / Ollama still not responding. Start Ollama and re-run this script."
         fi
       else
-        fail "找不到 Ollama。请先安装：https://ollama.com/"
+        fail "找不到 Ollama / Ollama not found. Install: https://ollama.com/"
       fi
 
       API_BASE_URL="http://localhost:11434/v1"
@@ -801,7 +801,7 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
 
       # 列出本地 embedding 模型
       echo ""
-      info "查询本地模型列表..."
+      info "查询本地模型列表 / Listing local models..."
       OLLAMA_MODELS=$(ollama list 2>/dev/null | tail -n +2 | awk '{print $1}' || echo "")
 
       if [[ -n "$OLLAMA_MODELS" ]]; then
@@ -818,7 +818,7 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
 
         if [[ -n "$EMBED_MODELS" ]]; then
           echo ""
-          echo -e "  ${BOLD}检测到以下 embedding 模型：${NC}"
+          echo -e "  ${BOLD}检测到以下 embedding 模型 / Detected embedding models:${NC}"
           local_n=0
           declare -a LOCAL_EMBED_LIST=()
           for m in $EMBED_MODELS; do
@@ -827,46 +827,46 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
             echo "    $local_n) $m"
           done
           echo ""
-          read -p "  选一个（输入编号，回车选 1）: " EMBED_CHOICE
+          read -p "  选一个 / Pick one (number, Enter for 1): " EMBED_CHOICE
           EMBED_CHOICE=${EMBED_CHOICE:-1}
           if [[ "$EMBED_CHOICE" =~ ^[0-9]+$ ]] && [[ "$EMBED_CHOICE" -ge 1 ]] && [[ "$EMBED_CHOICE" -le $local_n ]]; then
             EMBEDDING_MODEL="${LOCAL_EMBED_LIST[$((EMBED_CHOICE - 1))]}"
           else
             EMBEDDING_MODEL="${LOCAL_EMBED_LIST[0]}"
           fi
-          success "已选模型：$EMBEDDING_MODEL"
+          success "已选模型 / Selected model: $EMBEDDING_MODEL"
         else
           echo ""
-          warn "本地没有 embedding 模型。已有模型：$ALL_MODELS"
+          warn "本地没有 embedding 模型 / No local embedding models. Available: $ALL_MODELS"
           echo ""
-          echo "  推荐拉一个 embedding 模型："
+          echo "  推荐拉一个 embedding 模型 / Recommended — pull an embedding model:"
           echo "    ollama pull nomic-embed-text"
           echo "    ollama pull mxbai-embed-large"
           echo ""
-          read -p "  已拉取？输入模型名（或回车用 nomic-embed-text）: " EMBEDDING_MODEL
+          read -p "  已拉取？输入模型名 / Already pulled? Enter model name (Enter for nomic-embed-text): " EMBEDDING_MODEL
           EMBEDDING_MODEL=${EMBEDDING_MODEL:-nomic-embed-text}
 
           # 自动拉取
           if ! echo "$ALL_MODELS" | grep -q "$EMBEDDING_MODEL"; then
             echo ""
-            read -p "  要自动拉取 $EMBEDDING_MODEL 吗？(y/n) [y]: " PULL_IT
+            read -p "  要自动拉取 $EMBEDDING_MODEL 吗？/ Auto-pull $EMBEDDING_MODEL? (y/n) [y]: " PULL_IT
             if [[ "${PULL_IT:-y}" =~ ^[yY]$ ]]; then
-              info "正在拉取 $EMBEDDING_MODEL，请稍候..."
+              info "正在拉取 / Pulling $EMBEDDING_MODEL..."
               if ollama pull "$EMBEDDING_MODEL" 2>&1; then
-                success "模型拉取完成"
+                success "模型拉取完成 / Model pulled successfully"
               else
-                fail "拉取失败。请手动运行：ollama pull $EMBEDDING_MODEL"
+                fail "拉取失败 / Pull failed. Run manually: ollama pull $EMBEDDING_MODEL"
               fi
             fi
           fi
         fi
       else
-        warn "没有检测到任何本地模型。"
+        warn "没有检测到任何本地模型 / No local models detected."
         echo ""
-        echo "  请先拉取一个 embedding 模型："
+        echo "  请先拉取一个 embedding 模型 / Pull an embedding model first:"
         echo "    ollama pull nomic-embed-text"
         echo ""
-        read -p "  已拉取？输入模型名（或回车用 nomic-embed-text）: " EMBEDDING_MODEL
+        read -p "  已拉取？输入模型名 / Already pulled? Enter model name (Enter for nomic-embed-text): " EMBEDDING_MODEL
         EMBEDDING_MODEL=${EMBEDDING_MODEL:-nomic-embed-text}
       fi
       # Ollama 没有 rerank
@@ -874,29 +874,29 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
 
     custom)
       echo ""
-      echo "  填写你的 OpenAI 兼容 API 信息："
-      echo "  （支持 LM Studio、vLLM、LocalAI、DeepSeek、Together 等）"
+      echo "  填写 OpenAI 兼容 API 信息 / Enter your OpenAI-compatible API info:"
+      echo "  （支持 / Supports: LM Studio, vLLM, LocalAI, DeepSeek, Together, etc.）"
       echo ""
-      read -p "  API Base URL（如 http://localhost:1234/v1）: " API_BASE_URL
-      [[ -n "$API_BASE_URL" ]] || fail "Base URL 不能为空"
+      read -p "  API Base URL (e.g. http://localhost:1234/v1): " API_BASE_URL
+      [[ -n "$API_BASE_URL" ]] || fail "Base URL 不能为空 / Base URL cannot be empty"
 
-      read -p "  API Key（不需要则直接回车）: " API_KEY
+      read -p "  API Key（回车跳过 / Enter to skip）: " API_KEY
       API_KEY=${API_KEY:-"no-key"}
 
       echo ""
-      read -p "  Embedding 模型名（不确定则回车自动探测）: " EMBEDDING_MODEL
+      read -p "  Embedding 模型名 / Embedding model name (Enter to auto-detect): " EMBEDDING_MODEL
       echo ""
-      echo "  是否有 rerank 服务？"
-      read -p "  Rerank 端点 URL（没有则回车跳过）: " RERANK_ENDPOINT
+      echo "  是否有 rerank 服务？/ Do you have a rerank service?"
+      read -p "  Rerank endpoint URL（回车跳过 / Enter to skip）: " RERANK_ENDPOINT
       if [[ -n "$RERANK_ENDPOINT" ]]; then
-        read -p "  Rerank 模型名: " RERANK_MODEL
+        read -p "  Rerank model name: " RERANK_MODEL
         RERANK_API_KEY="$API_KEY"
         RERANK_PROVIDER="jina"  # 默认假设 Jina 格式
       fi
       ;;
   esac
 
-  success "API 来源：$PROVIDER"
+  success "API 来源 / API provider: $PROVIDER"
 
   # ============================================================
   #  第 5 步：能力探测（v3.0 核心改动）
@@ -925,9 +925,9 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
   if $DRY_RUN; then
     dry "node $PROBE_SCRIPT ${PROBE_ARGS[*]}"
     RECOMMENDED_LEVEL="balanced-default"
-    warn "DRY-RUN 模式不会真实探测，假定推荐 balanced-default。"
+    warn "DRY-RUN 模式不真实探测 / DRY-RUN skips real probe, assuming balanced-default."
   else
-    info "正在探测，请稍候..."
+    info "正在探测，请稍候 / Probing, please wait..."
     echo ""
 
     if node "$PROBE_SCRIPT" "${PROBE_ARGS[@]}" 2>/dev/null; then
@@ -943,16 +943,16 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
 
       # 展示探测结果
       if [[ "$PROBE_EMB_OK" == "true" ]]; then
-        success "Embedding   $PROBE_EMB_MODEL (${PROBE_EMB_DIM}维, ${PROBE_EMB_MS}ms)"
+        success "Embedding   $PROBE_EMB_MODEL (${PROBE_EMB_DIM}d, ${PROBE_EMB_MS}ms)"
       else
-        PROBE_EMB_ERR=$(node -p "JSON.parse(require('fs').readFileSync('$PROBE_RESULT','utf8')).embedding.error || '未知错误'" 2>/dev/null || echo "未知错误")
-        warn "Embedding   探测失败: $PROBE_EMB_ERR"
+        PROBE_EMB_ERR=$(node -p "JSON.parse(require('fs').readFileSync('$PROBE_RESULT','utf8')).embedding.error || 'unknown error'" 2>/dev/null || echo "unknown error")
+        warn "Embedding   探测失败 / Probe failed: $PROBE_EMB_ERR"
       fi
 
       if [[ "$PROBE_RERANK_OK" == "true" ]]; then
         success "Rerank      $PROBE_RERANK_MODEL (${PROBE_RERANK_MS}ms)"
       else
-        PROBE_RERANK_REASON=$(node -p "JSON.parse(require('fs').readFileSync('$PROBE_RESULT','utf8')).rerank.reason || '不可用'" 2>/dev/null || echo "不可用")
+        PROBE_RERANK_REASON=$(node -p "JSON.parse(require('fs').readFileSync('$PROBE_RESULT','utf8')).rerank.reason || 'unavailable'" 2>/dev/null || echo "unavailable")
         info "Rerank      $PROBE_RERANK_REASON"
       fi
 
@@ -960,25 +960,25 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
 
       if [[ "$PROBE_EMB_OK" != "true" ]]; then
         # embedding 都不通，提示用户
-        warn "Embedding 探测失败。可能原因："
-        echo "    - API Key 不正确"
-        echo "    - 服务未启动"
-        echo "    - 网络不通"
+        warn "Embedding 探测失败 / Embedding probe failed. Possible causes:"
+        echo "    - API Key 不正确 / Incorrect API Key"
+        echo "    - 服务未启动 / Service not running"
+        echo "    - 网络不通 / Network unreachable"
         echo ""
-        echo "  可以先选 lite-safe 模板装上，之后调通了重跑脚本。"
+        echo "  可先选 lite-safe 装上，之后调通重跑 / Pick lite-safe for now, re-run after fixing."
         RECOMMENDED_LEVEL="lite-safe"
       fi
 
       if $SELFCHECK_ONLY; then
         echo ""
-        success "--selfcheck-only 完成。探测报告：$PROBE_RESULT"
+        success "--selfcheck-only 完成 / Done. Probe report: $PROBE_RESULT"
         exit 0
       fi
     else
-      warn "探测脚本执行失败，使用默认推荐。"
+      warn "探测脚本执行失败，使用默认推荐 / Probe script failed, using defaults."
       RECOMMENDED_LEVEL="balanced-default"
       if $SELFCHECK_ONLY; then
-        fail "--selfcheck-only 模式下探测失败。"
+        fail "--selfcheck-only 模式下探测失败 / Probe failed in selfcheck-only mode."
       fi
     fi
   fi
@@ -993,12 +993,12 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
   # 如果 rerank 不可用，pro-rerank 不推荐
   PRO_NOTE=""
   if [[ "${PROBE_RERANK_OK:-false}" != "true" ]]; then
-    PRO_NOTE=" ${YELLOW}(需要 rerank 能力)${NC}"
+    PRO_NOTE=" ${YELLOW}(需要 rerank / requires rerank)${NC}"
   fi
 
-  echo -e "  ${BOLD}1) lite-safe${NC}        — 先存不召回，跑稳了再升 ${GREEN}← 新手推荐${NC}"
-  echo -e "  ${BOLD}2) balanced-default${NC} — 存+召回，大多数人适用"
-  echo -e "  ${BOLD}3) pro-rerank${NC}       — 追求召回质量$PRO_NOTE"
+  echo -e "  ${BOLD}1) lite-safe${NC}        — 先存不召回 / Store only, no recall ${GREEN}← 新手推荐 / Recommended${NC}"
+  echo -e "  ${BOLD}2) balanced-default${NC} — 存+召回 / Store + recall, fits most users"
+  echo -e "  ${BOLD}3) pro-rerank${NC}       — 追求召回质量 / Best recall quality$PRO_NOTE"
   echo ""
 
   # 标记推荐
@@ -1010,15 +1010,15 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
   esac
 
   while true; do
-    read -p "  输入数字 (1/2/3)，直接回车用推荐 ($REC_NUM): " LEVEL_CHOICE
+    read -p "  输入数字 / Enter number (1/2/3), Enter for recommended ($REC_NUM): " LEVEL_CHOICE
     LEVEL_CHOICE=${LEVEL_CHOICE:-$REC_NUM}
     case "$LEVEL_CHOICE" in
       1) TEMPLATE="lite-safe"; break ;;
       2) TEMPLATE="balanced-default"; break ;;
       3)
         if [[ "${PROBE_RERANK_OK:-false}" != "true" ]]; then
-          warn "你的 API 不支持 rerank，选 pro-rerank 后精排功能不会生效。"
-          read -p "  仍然选择？(y/n) [n]: " FORCE_PRO
+          warn "你的 API 不支持 rerank / Your API does not support rerank. Reranking won't work."
+          read -p "  仍然选择？/ Still choose this? (y/n) [n]: " FORCE_PRO
           if [[ "${FORCE_PRO:-n}" =~ ^[yY]$ ]]; then
             TEMPLATE="pro-rerank"; break
           fi
@@ -1026,10 +1026,10 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
           TEMPLATE="pro-rerank"; break
         fi
         ;;
-      *) warn "无效选择，请输入 1、2 或 3。" ;;
+      *) warn "无效选择，请输入 1-3 / Invalid, enter 1-3." ;;
     esac
   done
-  success "配置等级：$TEMPLATE"
+  success "配置等级 / Config level: $TEMPLATE"
 
   # ============================================================
   #  第 7 步：生成配置 JSON（v3.0 动态生成）
@@ -1103,14 +1103,14 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
   }
 
   if $DRY_RUN; then
-    dry "从探测结果生成 $TEMPLATE 配置"
+    dry "从探测结果生成配置 / Generate $TEMPLATE config from probe result"
     CONFIG_JSON='{}'
   else
     if [[ -f "${PROBE_RESULT:-}" ]]; then
       CONFIG_JSON=$(gen_config_from_probe "$PROBE_RESULT" "$TEMPLATE")
     else
       # 没有探测结果（跳过了探测），用预设生成
-      warn "无探测结果，使用预设默认值生成配置。"
+      warn "无探测结果，使用预设默认值 / No probe result, using preset defaults."
       # 写一个临时探测结果
       PROBE_RESULT="$(mktemp "${TMPDIR:-/tmp}/memory-probe-XXXXXX")"
   _TMPFILES+=("$PROBE_RESULT")
@@ -1135,7 +1135,7 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
     fi
   fi
 
-  success "配置已生成（等级：${TEMPLATE}）"
+  success "配置已生成 / Config generated (level: ${TEMPLATE})"
 
   # ── 第 8 步：克隆插件 ──
   echo ""
@@ -1147,19 +1147,19 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
 
   if [[ -d "$PLUGIN_DIR" ]]; then
     # 已有目录（git 更新已在第 2.5 步完成，npm 用户自己管）
-    success "插件目录已存在，跳过下载: $PLUGIN_DIR"
+    success "插件目录已存在，跳过下载 / Plugin dir exists, skipping download: $PLUGIN_DIR"
   elif $DRY_RUN; then
     dry "git clone --branch $PLUGIN_REF --depth 1 $GITHUB_URL $PLUGIN_DIR"
   else
     mkdir -p "$(dirname "$PLUGIN_DIR")"
     info "正在下载，请稍候 / Downloading, please wait..."
     if ! git clone --branch "$PLUGIN_REF" --depth 1 --quiet "$GITHUB_URL" "$PLUGIN_DIR" 2>&1; then
-      warn "GitHub clone 失败，尝试国内镜像..."
+      warn "GitHub clone 失败，尝试镜像 / GitHub failed, trying mirror..."
       git clone --branch "$PLUGIN_REF" --depth 1 --quiet "https://ghproxy.com/$GITHUB_URL" "$PLUGIN_DIR" \
-        || fail "镜像也失败了。请手动下载 zip 解压到 $PLUGIN_DIR 后重新运行脚本。"
+        || fail "镜像也失败 / Mirror also failed. Download zip manually to $PLUGIN_DIR and re-run."
     fi
     INSTALLED_REF=$(git -C "$PLUGIN_DIR" rev-parse --short HEAD 2>/dev/null || echo "$PLUGIN_REF")
-    success "插件下载完成（ref: $PLUGIN_REF, HEAD: $INSTALLED_REF）"
+    success "插件下载完成 / Plugin downloaded (ref: $PLUGIN_REF, HEAD: $INSTALLED_REF)"
   fi
 
   # ── 第 9 步：安装依赖 ──
@@ -1169,15 +1169,15 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
   if $DRY_RUN; then
     dry "cd $PLUGIN_DIR && npm install"
   elif [[ -d "$PLUGIN_DIR/node_modules" ]] && [[ -n "${OLD_HEAD:-}" ]] && [[ "${OLD_HEAD:-}" == "${INSTALLED_REF:-}" ]]; then
-    warn "node_modules 已存在且版本未变，跳过。"
+    warn "node_modules 已存在且版本未变，跳过 / node_modules exists and version unchanged, skipping."
   else
-    info "正在安装依赖，请稍候..."
+    info "正在安装依赖 / Installing dependencies..."
     if ! (cd "$PLUGIN_DIR" && npm install --loglevel=warn 2>&1); then
-      warn "默认源失败，切换国内镜像..."
+      warn "默认源失败，切换镜像 / Default registry failed, trying mirror..."
       (cd "$PLUGIN_DIR" && npm install --loglevel=warn --registry https://registry.npmmirror.com 2>&1) \
-        || fail "npm install 失败。请手动运行：cd $PLUGIN_DIR && npm install --registry https://registry.npmmirror.com"
+        || fail "npm install 失败 / npm install failed. Run manually: cd $PLUGIN_DIR && npm install --registry https://registry.npmmirror.com"
     fi
-    success "依赖安装完成"
+    success "依赖安装完成 / Dependencies installed"
   fi
 
   # ── 第 9.5 步：Schema 动态过滤 ──
@@ -1187,7 +1187,7 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
     local CONFIG_JSON_INPUT="$1"
     local MANIFEST_PATH="$2"
 
-    [[ -f "$MANIFEST_PATH" ]] || { warn "找不到插件 manifest：$MANIFEST_PATH"; return 1; }
+    [[ -f "$MANIFEST_PATH" ]] || { warn "找不到插件 manifest / Plugin manifest not found: $MANIFEST_PATH"; return 1; }
 
     CONFIG_JSON_ENV="$CONFIG_JSON_INPUT" MANIFEST_PATH_ENV="$MANIFEST_PATH" node - <<'NODE'
 const fs = require('fs');
@@ -1225,7 +1225,7 @@ NODE
   if ! $DRY_RUN && [[ -f "$PLUGIN_MANIFEST" ]]; then
     # 过滤前校验
     if ! CONFIG_JSON_ENV="$CONFIG_JSON" node -e 'JSON.parse(process.env.CONFIG_JSON_ENV)' >/dev/null 2>&1; then
-      fail "生成的插件配置不是合法 JSON（schema 过滤前），请检查模板生成逻辑。"
+      fail "生成的配置不是合法 JSON（过滤前）/ Generated config is not valid JSON (pre-filter)."
     fi
 
     FILTER_RESULT_JSON=$(filter_config_by_schema "$CONFIG_JSON" "$PLUGIN_MANIFEST") || true
@@ -1242,7 +1242,7 @@ NODE
 
       # 过滤后校验
       if ! CONFIG_JSON_ENV="$CONFIG_JSON" node -e 'JSON.parse(process.env.CONFIG_JSON_ENV)' >/dev/null 2>&1; then
-        fail "schema 过滤后的配置不是合法 JSON，请检查过滤逻辑。"
+        fail "schema 过滤后配置不是合法 JSON / Config is not valid JSON after schema filter."
       fi
     else
       warn "Schema 过滤执行失败，跳过过滤，使用原始配置 / Schema filter failed, using original config."
@@ -1253,7 +1253,7 @@ NODE
 
   # ── 第 10 步：写入 openclaw.json ──
   echo ""
-  info "第 10 步：写入 openclaw.json..."
+  info "第 10 步：写入 / Step 10: Writing openclaw.json..."
 
   MERGE_JSON=$(cat <<MERGEOF
 {
@@ -1276,48 +1276,48 @@ MERGEOF
   )
 
   if $DRY_RUN; then
-    dry "将以下配置合并到 $OPENCLAW_JSON:"
+    dry "将以下配置合并到 / Merge config into $OPENCLAW_JSON:"
     echo "$MERGE_JSON" | head -20
     echo "  ..."
   elif ! $HAS_JQ; then
     echo ""
     echo "======================================================"
-    echo "  没有 jq，无法自动合并配置。"
-    echo "  请手动把以下内容加入 ${OPENCLAW_JSON}："
+    echo "  没有 jq，无法自动合并 / No jq, cannot auto-merge."
+    echo "  请手动加入以下内容 / Manually add to ${OPENCLAW_JSON}:"
     echo "======================================================"
     echo ""
     echo "$MERGE_JSON"
     echo ""
     echo "------------------------------------------------------"
-    echo "  如果已有 plugins 字段，请合并内容，不要覆盖。"
-    echo "  提示：安装 jq 后重新运行脚本可实现全自动。"
+    echo "  如果已有 plugins 字段，请合并 / If plugins key exists, merge instead of overwrite."
+    echo "  提示 / Tip: Install jq and re-run for full automation."
     echo "    Mac:   brew install jq"
     echo "    Linux: sudo apt install jq"
     echo "------------------------------------------------------"
     echo ""
-    read -p "编辑完成后，按回车继续验证... "
+    read -p "编辑完成后按回车 / Press Enter when done... "
   else
     if [[ ! -f "$OPENCLAW_JSON" ]]; then
-      warn "openclaw.json 不存在，将创建新文件。"
+      warn "openclaw.json 不存在，将创建 / openclaw.json not found, creating new file."
       echo '{}' > "$OPENCLAW_JSON"
     fi
 
     if ! jq empty "$OPENCLAW_JSON" 2>/dev/null; then
-      fail "openclaw.json 格式错误（不是合法 JSON），请先手动修复。"
+      fail "openclaw.json 格式错误 / Invalid JSON in openclaw.json. Please fix manually."
     fi
 
     EXISTING_MEMORY=$(jq -r '.plugins.slots.memory // empty' "$OPENCLAW_JSON" 2>/dev/null || echo "")
     if [[ -n "$EXISTING_MEMORY" && "$EXISTING_MEMORY" != "memory-lancedb-pro" ]]; then
       echo ""
-      warn "检测到已有 memory 插件：$EXISTING_MEMORY"
+      warn "检测到已有 memory 插件 / Existing memory plugin found: $EXISTING_MEMORY"
       echo ""
-      echo "  如果继续，memory slot 会被替换为 memory-lancedb-pro。"
-      echo "  原来的插件配置会保留，只是不再作为默认 memory 插件。"
+      echo "  继续将替换 memory slot 为 memory-lancedb-pro / This will replace the memory slot."
+      echo "  原插件配置保留 / Original plugin config will be kept."
       echo ""
-      read -p "  要替换吗？(y/n) [n]: " REPLACE
+      read -p "  要替换吗？/ Replace? (y/n) [n]: " REPLACE
       if [[ "${REPLACE:-n}" != "y" && "${REPLACE:-n}" != "Y" ]]; then
         echo ""
-        echo "  已取消。配置内容如下，可手动参考："
+        echo "  已取消 / Cancelled. Config for manual reference:"
         echo ""
         echo "$MERGE_JSON"
         echo ""
@@ -1327,7 +1327,7 @@ MERGEOF
 
     BACKUP_FILE="$OPENCLAW_JSON.backup.$(date +%Y%m%d_%H%M%S)"
     cp "$OPENCLAW_JSON" "$BACKUP_FILE"
-    success "已备份当前配置 → $BACKUP_FILE"
+    success "已备份当前配置 / Current config backed up → $BACKUP_FILE"
 
     MERGED=$(jq --argjson new "$MERGE_JSON" '
       .plugins //= {} |
@@ -1342,9 +1342,9 @@ MERGEOF
 
     if echo "$MERGED" | jq empty 2>/dev/null; then
       echo "$MERGED" > "$OPENCLAW_JSON"
-      success "openclaw.json 已更新（原文件已备份）"
+      success "openclaw.json 已更新 / openclaw.json updated (original backed up)"
     else
-      fail "合并后 JSON 格式异常，已中止。原文件未改动。备份在：$BACKUP_FILE"
+      fail "合并后 JSON 异常，已中止 / Merged JSON invalid, aborted. Backup: $BACKUP_FILE"
     fi
   fi
 
@@ -1368,16 +1368,16 @@ if $NEED_GATEWAY_RESTART; then
     dry "openclaw gateway restart"
   else
     if openclaw gateway restart 2>&1; then
-      success "Gateway 重启完成"
+      success "Gateway 重启完成 / Gateway restarted"
     else
-      warn "重启可能失败，请手动运行：openclaw gateway restart"
+      warn "重启可能失败 / Restart may have failed. Try: openclaw gateway restart"
     fi
   fi
 fi
 
 # ── 验证 ──
 echo ""
-info "确认插件运行状态（例行检查）..."
+info "确认插件运行状态 / Verifying plugin status..."
 
 if $DRY_RUN; then
   dry "openclaw plugins info memory-lancedb-pro"
@@ -1385,7 +1385,7 @@ if $DRY_RUN; then
   dry "openclaw memory-pro stats"
   dry "node $VALIDATE_SCRIPT"
   echo ""
-  success "DRY-RUN 完成。确认无误后去掉 --dry-run 参数正式运行。"
+  success "DRY-RUN 完成 / DRY-RUN done. Remove --dry-run to run for real."
   exit 0
 fi
 
@@ -1395,10 +1395,10 @@ TOTAL=3
 echo ""
 echo "--- 检查 1/3：插件是否加载 / Plugin loaded? ---"
 if openclaw plugins info memory-lancedb-pro 2>&1; then
-  success "插件已加载"
+  success "插件已加载 / Plugin loaded"
   PASS=$((PASS + 1))
 else
-  warn "插件加载可能有问题"
+  warn "插件加载可能有问题 / Plugin may not be loaded correctly"
 fi
 
 echo ""
@@ -1408,20 +1408,20 @@ if [[ "$SLOT" == *"memory-lancedb-pro"* ]]; then
   success "memory slot → memory-lancedb-pro"
   PASS=$((PASS + 1))
 else
-  warn "memory slot 未正确配置，当前值：$SLOT"
+  warn "memory slot 未正确配置 / memory slot misconfigured, current: $SLOT"
 fi
 
 echo ""
 echo "--- 检查 3/3：记忆库状态 / Memory store status ---"
 if openclaw memory-pro stats 2>&1; then
-  success "记忆库正常"
+  success "记忆库正常 / Memory store OK"
   PASS=$((PASS + 1))
 else
   if $FRESH_INSTALL; then
-    info "记忆库尚未初始化（这是正常的，第一次对话后会自动创建）"
+    info "记忆库尚未初始化（正常）/ Memory store not initialized yet (normal, auto-created after first chat)"
     PASS=$((PASS + 1))
   else
-    warn "记忆库状态检查失败"
+    warn "记忆库状态检查失败 / Memory store check failed"
   fi
 fi
 
@@ -1430,22 +1430,22 @@ echo ""
 echo "======================================================"
 if [[ "$PASS" -eq "$TOTAL" ]]; then
   if $FRESH_INSTALL; then
-    echo -e "${GREEN}${BOLD}  全部通过（${PASS}/${TOTAL}）！安装完成！${NC}"
+    echo -e "${GREEN}${BOLD}  全部通过 / All passed (${PASS}/${TOTAL})! 安装完成 / Install complete!${NC}"
   elif $UPGRADE_DONE; then
-    echo -e "${GREEN}${BOLD}  全部通过（${PASS}/${TOTAL}）！升级完成！${NC}"
+    echo -e "${GREEN}${BOLD}  全部通过 / All passed (${PASS}/${TOTAL})! 升级完成 / Upgrade complete!${NC}"
   else
-    echo -e "${GREEN}${BOLD}  全部通过（${PASS}/${TOTAL}）！插件运行正常。${NC}"
+    echo -e "${GREEN}${BOLD}  全部通过 / All passed (${PASS}/${TOTAL})! 插件运行正常 / Plugin running OK.${NC}"
     if ! $FRESH_INSTALL; then
-      echo -e "  当前版本：v$LOCAL_VER"
+      echo -e "  当前版本 / Current version: v$LOCAL_VER"
     fi
   fi
 else
-  echo -e "${YELLOW}${BOLD}  $PASS/$TOTAL 通过${NC}"
+  echo -e "${YELLOW}${BOLD}  $PASS/$TOTAL 通过 / passed${NC}"
   echo ""
-  echo "  请检查上方未通过的项目。"
+  echo "  请检查上方未通过的项目 / Check failed items above."
   echo ""
   if [[ -n "${BACKUP_FILE:-}" ]]; then
-    echo "  如需还原配置：cp $BACKUP_FILE $OPENCLAW_JSON"
+    echo "  如需还原 / To restore: cp $BACKUP_FILE $OPENCLAW_JSON"
   fi
 fi
 echo "======================================================"
@@ -1457,7 +1457,7 @@ echo ""
 if [[ "$PASS" -eq "$TOTAL" ]] && ! $DRY_RUN && [[ -f "$VALIDATE_SCRIPT" ]]; then
   echo ""
   info "配置校验 / Config Validation..."
-  node "$VALIDATE_SCRIPT" 2>/dev/null || warn "配置校验发现问题，请检查上方输出。"
+  node "$VALIDATE_SCRIPT" 2>/dev/null || warn "配置校验发现问题 / Config validation found issues. Check output above."
 fi
 
 # ============================================================
@@ -1494,15 +1494,15 @@ if [[ "$PASS" -eq "$TOTAL" ]] && ! $DRY_RUN; then
     # API Key 状态
     JINA_KEY_VAL=$(jq -r "$CFG_PATH.embedding.apiKey // \"\"" "$OPENCLAW_JSON" 2>/dev/null)
     if [[ -n "$JINA_KEY_VAL" && "$JINA_KEY_VAL" != "YOUR_JINA_API_KEY" && "$JINA_KEY_VAL" != "YOUR_API_KEY" ]]; then
-      KEY_STATUS="${GREEN}已配置${NC}"
+      KEY_STATUS="${GREEN}已配置 / Configured${NC}"
     else
-      KEY_STATUS="${YELLOW}未配置（占位符）${NC}"
+      KEY_STATUS="${YELLOW}未配置（占位符）/ Not configured (placeholder)${NC}"
     fi
 
     # ── 展示全景 ──
     echo -e "  ${BOLD}版本 / Version:${NC}      v$LOCAL_VER"
     echo -e "  ${BOLD}API Key:${NC}             $KEY_STATUS"
-    echo -e "  ${BOLD}Embedding 模型:${NC}      $EMB_MODEL ($EMB_BASE_URL, ${EMB_DIM}维)"
+    echo -e "  ${BOLD}Embedding Model:${NC}     $EMB_MODEL ($EMB_BASE_URL, ${EMB_DIM}d)"
     echo ""
 
     echo -e "  ${BOLD}── 存储 / Storage ──${NC}"
@@ -1527,7 +1527,7 @@ if [[ "$PASS" -eq "$TOTAL" ]] && ! $DRY_RUN; then
     if [[ "$SESSION_STRATEGY" == "memoryReflection" ]]; then
       show_feature on "Reflection" "智能提炼 / Smart extraction"
     else
-      show_feature off "Reflection" "智能提炼（当前：普通存储模式）"
+      show_feature off "Reflection" "智能提炼 / Smart extraction (currently: basic storage)"
     fi
 
     echo ""
@@ -1578,13 +1578,13 @@ if [[ "$PASS" -eq "$TOTAL" ]] && ! $DRY_RUN; then
     if [[ $n -eq 0 ]]; then
       echo -e "  ${GREEN}所有功能已开启，无需调整 / All features enabled, no changes needed.${NC}"
     else
-      echo -e "  ${BOLD}可选开启 / Available to enable（空格分隔，回车跳过）：${NC}"
+      echo -e "  ${BOLD}可选开启 / Available to enable (space-separated, Enter to skip):${NC}"
       echo ""
       for label in "${OPTION_LABELS[@]}"; do
         echo "    $label"
       done
       echo ""
-      read -p "  输入编号（如 1 2 或 1,2），回车跳过: " UPGRADE_INPUT
+      read -p "  输入编号 / Enter numbers (e.g. 1 2 or 1,2), Enter to skip: " UPGRADE_INPUT
 
       # 只按空格/逗号/中文逗号分割，不拆连续数字（防止 12 变成 1 2）
       UPGRADE_INPUT=$(echo "$UPGRADE_INPUT" | tr '，,' ' ' | tr -s ' ' | sed 's/^ *//;s/ *$//')
@@ -1594,12 +1594,12 @@ if [[ "$PASS" -eq "$TOTAL" ]] && ! $DRY_RUN; then
 
         for choice in $UPGRADE_INPUT; do
           if ! [[ "$choice" =~ ^[0-9]+$ ]]; then
-            warn "请输入数字编号 / Please enter numbers, got: $choice"
+            warn "请输入数字 / Please enter a number, got: $choice"
             continue
           fi
 
           if [[ "$choice" -lt 1 || "$choice" -gt $n ]]; then
-            warn "选项 $choice 超出范围 / Option $choice out of range (1-$n)"
+            warn "选项超出范围 / Option $choice out of range (1-$n)"
             continue
           fi
 
@@ -1630,7 +1630,7 @@ if [[ "$PASS" -eq "$TOTAL" ]] && ! $DRY_RUN; then
             reflection)
               if jq_safe_write "$CFG_PATH.sessionStrategy = \"memoryReflection\"" "$OPENCLAW_JSON"; then
                 success "memoryReflection enabled / 已开启智能提炼"
-                echo "    每轮对话多一次 AI 调用 / Extra AI call per turn for distillation."
+                echo "    每轮多一次 AI 调用 / Extra AI call per turn for distillation."
                 NEED_RESTART=true
               else
                 warn "memoryReflection 写入失败 / Failed"
@@ -1675,7 +1675,7 @@ if [[ "$PASS" -eq "$TOTAL" ]] && ! $DRY_RUN; then
           fi
         else
           echo ""
-          info "没有选中任何有效功能，配置未改动。"
+          info "没有选中有效功能，配置未改动 / No valid options selected, config unchanged."
         fi
       else
         echo ""
@@ -1685,7 +1685,7 @@ if [[ "$PASS" -eq "$TOTAL" ]] && ! $DRY_RUN; then
 
   else
     if ! $HAS_JQ; then
-      warn "没有 jq，无法读取配置全景。安装 jq 后重跑可查看。"
+      warn "没有 jq，无法读取配置全景 / No jq, cannot display config overview. Install jq and re-run."
       echo "    Mac: brew install jq  |  Linux: sudo apt install jq"
     fi
 
@@ -1704,6 +1704,6 @@ if [[ "$PASS" -eq "$TOTAL" ]] && ! $DRY_RUN; then
   # ── 提示下次升级 ──
   echo ""
   echo -e "  ${BOLD}之后升级 / Future upgrades:${NC}"
-  echo "    bash setup-memory.sh          # 检查稳定版更新"
-  echo "    bash setup-memory.sh --beta   # 包含 beta 版本"
+  echo "    bash setup-memory.sh          # 检查稳定版更新 / Check for stable updates"
+  echo "    bash setup-memory.sh --beta   # 包含 beta 版本 / Include beta versions"
 fi
