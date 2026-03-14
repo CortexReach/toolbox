@@ -593,6 +593,9 @@ if ! $SELFCHECK_ONLY && [[ -d "$PLUGIN_DIR/.git" ]]; then
     dry "cd $PLUGIN_DIR && git fetch origin && git checkout $PLUGIN_REF && git pull origin $PLUGIN_REF"
   else
     if git -C "$PLUGIN_DIR" fetch origin 2>&1; then
+      # 清理 npm 生成的本地改动（package-lock.json 等），防止 checkout 被挡
+      git -C "$PLUGIN_DIR" checkout -- package-lock.json 2>/dev/null || true
+      git -C "$PLUGIN_DIR" stash --quiet 2>/dev/null || true
       if git -C "$PLUGIN_DIR" checkout "$PLUGIN_REF" 2>&1; then
         # 分支才 pull，tag 不需要
         if git -C "$PLUGIN_DIR" symbolic-ref HEAD >/dev/null 2>&1; then
@@ -682,8 +685,9 @@ if ! $FRESH_INSTALL && ! $SELFCHECK_ONLY; then
     echo -e "    当前 / Current: ${YELLOW}v$LOCAL_VER${NC}"
     echo -e "    最新 / Latest:  ${GREEN}v$REMOTE_VER${NC}"
 
+    # 如果目标版本本身就是 beta，changelog 也要展示 beta
     BETA_FLAG="false"
-    if $INCLUDE_BETA; then BETA_FLAG="true"; fi
+    if $INCLUDE_BETA || [[ "$REMOTE_VER" == *-* ]]; then BETA_FLAG="true"; fi
     show_changelog "$LOCAL_VER" "$BETA_FLAG"
 
     read -p "  是否升级？/ Upgrade now? (y/n) [y]: " DO_UPGRADE
@@ -1606,15 +1610,26 @@ if [[ "$PASS" -eq "$TOTAL" ]] && ! $DRY_RUN; then
     OPTION_LABELS=()
     n=0
 
-    if [[ "$AUTO_CAPTURE" != "true" ]]; then
+    # 检查 schema 是否支持某个字段（不支持就不提供该选项）
+    schema_has_field() {
+      local field="$1"
+      [[ -f "$PLUGIN_MANIFEST" ]] || return 0  # 没 manifest 就假设支持
+      MANIFEST_ENV="$PLUGIN_MANIFEST" FIELD_ENV="$field" node -e "
+        const m = JSON.parse(require('fs').readFileSync(process.env.MANIFEST_ENV,'utf8'));
+        const props = m.configSchema?.properties || {};
+        process.exit(props.hasOwnProperty(process.env.FIELD_ENV) ? 0 : 1);
+      " 2>/dev/null
+    }
+
+    if [[ "$AUTO_CAPTURE" != "true" ]] && schema_has_field "autoCapture"; then
       n=$((n+1)); OPTION_KEYS+=("autoCapture")
       OPTION_LABELS+=("$n) autoCapture    — 开启自动存储 / Enable auto store")
     fi
-    if [[ "$AUTO_RECALL" != "true" ]]; then
+    if [[ "$AUTO_RECALL" != "true" ]] && schema_has_field "autoRecall"; then
       n=$((n+1)); OPTION_KEYS+=("autoRecall")
       OPTION_LABELS+=("$n) autoRecall     — 开启自动召回 / Enable auto recall in new chats")
     fi
-    if [[ "$SESSION_STRATEGY" != "memoryReflection" ]]; then
+    if [[ "$SESSION_STRATEGY" != "memoryReflection" ]] && schema_has_field "sessionStrategy"; then
       n=$((n+1)); OPTION_KEYS+=("reflection")
       OPTION_LABELS+=("$n) Reflection     — 智能提炼 / Smart extraction (~500-1000 extra tokens/turn)")
     fi
@@ -1622,7 +1637,7 @@ if [[ "$PASS" -eq "$TOTAL" ]] && ! $DRY_RUN; then
       n=$((n+1)); OPTION_KEYS+=("rerank")
       OPTION_LABELS+=("$n) rerank         — 精排 / Enable reranking")
     fi
-    if [[ "$MD_MIRROR" != "true" ]]; then
+    if [[ "$MD_MIRROR" != "true" ]] && schema_has_field "mdMirror"; then
       n=$((n+1)); OPTION_KEYS+=("mdMirror")
       OPTION_LABELS+=("$n) mdMirror       — 可读 .md 备份 / Enable .md mirror")
     fi
