@@ -61,53 +61,26 @@ bash setup-memory.sh --uninstall        # Revert config and remove plugin / 还�
 
 ## How It Works
 
-```mermaid
-flowchart TD
-    A[bash setup-memory.sh] --> B[Step 1: Environment check]
-    B --> C[Step 2: Detect workspace]
-    C --> D{Plugin dir is git repo?}
-    D -->|Yes| E[Step 2.5: git fetch + checkout + pull]
-    D -->|No| F[Skip]
-    E --> G[Step 3: Detect installed version]
-    F --> G
-    G --> H{Already installed?}
-    H -->|Yes| I[Step 4: Compare versions, offer upgrade]
-    H -->|No| J[Fresh install: Steps 5-10]
-    I --> K{HEAD changed?}
-    K -->|Yes| L[npm install]
-    K -->|No| M[Skip]
-    L --> N[Health checks 3/3]
-    M --> N
-    J --> J1[Choose API provider]
-    J1 --> J2[Clone plugin]
-    J2 --> J3[npm install]
-    J3 --> J4[Schema filter]
-    J4 --> J5[Write openclaw.json]
-    J5 --> J6[Restart Gateway]
-    J6 --> N
-    N --> O[Config overview]
-
-    style E fill:#4CAF50,color:white
-    style J4 fill:#FF9800,color:white
-    style N fill:#2196F3,color:white
 ```
-
-**Text version / 文字版：**
-
-```
-Step 1:   Environment check (node, openclaw, jq)
-Step 2:   Detect workspace path (3-level fallback)
-Step 2.5: Git auto-update (fetch + checkout + pull)
-Step 3:   Detect installed version
-Step 4:   Compare with remote, offer upgrade
-─── Fresh install only ───
-Step 5-7: Choose API provider + config template
-Step 8:   Clone plugin (--branch $ref --depth 1)
-Step 9:   npm install
-Step 9.5: Schema filter (remove unsupported fields)
-Step 10:  Write to openclaw.json (safe deep-merge)
-─── All users ───
-Restart Gateway → 3/3 health checks → config overview
+bash setup-memory.sh
+ │
+ ├─ Step 1    Environment check (node, openclaw, jq)
+ ├─ Step 2    Detect workspace path (3-level fallback)
+ ├─ Step 2.5  Git auto-update (fetch + checkout + pull)
+ ├─ Step 3    Detect installed version
+ ├─ Step 4    Compare with remote, offer upgrade
+ │
+ │  ── Fresh install only ──
+ ├─ Step 5-7  Choose API provider + config template
+ ├─ Step 8    Clone plugin (--branch $ref --depth 1)
+ ├─ Step 9    npm install
+ ├─ Step 9.5  Schema filter (remove unsupported fields)
+ ├─ Step 10   Write to openclaw.json (safe deep-merge)
+ │
+ │  ── All users ──
+ ├─ Restart Gateway
+ ├─ Health checks (3/3)
+ └─ Config overview
 ```
 
 ## Key Features
