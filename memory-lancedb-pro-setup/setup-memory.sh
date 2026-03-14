@@ -39,7 +39,7 @@ set -euo pipefail
 
 # ── 临时文件清理（含 API Key，必须清理） ──
 _TMPFILES=()
-cleanup_tmp() { for f in "${_TMPFILES[@]}"; do rm -f "$f" 2>/dev/null; done; }
+cleanup_tmp() { for f in "${_TMPFILES[@]+"${_TMPFILES[@]}"}"; do rm -f "$f" 2>/dev/null; done; }
 trap cleanup_tmp EXIT
 
 # ── 参数解析 ──
