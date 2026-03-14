@@ -81,7 +81,7 @@ bash setup-memory.sh
 
 | File | Description |
 |------|-------------|
-| `setup-memory.sh` | Main installer script (v3.3) |
+| `setup-memory.sh` | Main installer script (v3.4) |
 | `scripts/memory-selfcheck.mjs` | Capability self-check (embedding & rerank probe) |
 | `scripts/probe-endpoint.mjs` | Universal OpenAI-compatible API endpoint probe (v3.0+) |
 | `scripts/config-validate.mjs` | Post-install config field validation (v3.0+) |
@@ -102,6 +102,14 @@ bash setup-memory.sh
 | Windows WSL | Windows Terminal | pass |
 
 ## Changelog
+
+### v3.4 (2026-03-15)
+- Security: replace `eval` tilde expansion with safe parameter substitution
+- Security: pass file paths to `node -e` via env vars instead of string interpolation
+- Security: pass API keys to `jq` via `--arg` instead of direct interpolation
+- Add `plugins.allow` whitelist to fix "plugin not found" for git-cloned plugins
+- Auto-detect DashScope rerank endpoint when DashScope is the embedding provider
+- Branch detection: `git fetch --prune` before detecting, fallback hardcoded to `master`
 
 ### v3.3 (2026-03-14)
 - Fix: run schema filter again before gateway restart after optional feature toggles (autoRecall/reflection/rerank/mdMirror wrote fields that bypassed the v3.1 initial filter)

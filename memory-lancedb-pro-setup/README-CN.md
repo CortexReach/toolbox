@@ -81,7 +81,7 @@ bash setup-memory.sh
 
 | 文件 | 说明 |
 |------|------|
-| `setup-memory.sh` | 主安装脚本（v3.3） |
+| `setup-memory.sh` | 主安装脚本（v3.4） |
 | `scripts/memory-selfcheck.mjs` | 能力自检（embedding 和 rerank 探测） |
 | `scripts/probe-endpoint.mjs` | 通用 OpenAI 兼容 API 端口探测（v3.0+） |
 | `scripts/config-validate.mjs` | 安装后配置字段校验（v3.0+） |
@@ -102,6 +102,14 @@ bash setup-memory.sh
 | Windows WSL | Windows Terminal | 通过 |
 
 ## 更新日志
+
+### v3.4（2026-03-15）
+- 安全：`eval` tilde 展开改为纯参数替换，防命令注入
+- 安全：`node -e` 文件路径改用环境变量传入，防路径注入
+- 安全：rerank API key 改用 `jq --arg` 传入，防特殊字符注入
+- 新增 `plugins.allow` 白名单（修复 git-clone 插件 "plugin not found"）
+- DashScope embedding 用户自动检测 rerank 端点（qwen3-rerank）
+- 分支检测优化：`git fetch --prune` 清理残留远程分支，fallback 硬编码 `master`
 
 ### v3.3（2026-03-14）
 - 修复：可选功能（autoRecall/reflection/rerank/mdMirror）写入后、Gateway 重启前再跑一次 schema 过滤，防止绕过 v3.1 的初始过滤
