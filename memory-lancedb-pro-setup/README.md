@@ -174,12 +174,11 @@ Or enter any OpenAI-compatible API endpoint manually.
 
 ## Tested On
 
-| OS | Terminal | Result |
-|----|----------|--------|
-| macOS | Terminal / iTerm2 | pass |
-| Windows WSL | Windows Terminal | pass |
-| Linux (Docker) | Various | pass |
-| Docker (OpenClaw container) | Direct exec | pass |
+| OS | Terminal | Version | Result |
+|----|----------|---------|--------|
+| Linux (Docker arm64) | OpenClaw container | v3.2 | pass |
+| macOS | Terminal / iTerm2 | v1.2+ | pass |
+| Windows WSL | Windows Terminal | v1.1 | pass (older version, v3.2 not yet tested) |
 
 ## Changelog
 
