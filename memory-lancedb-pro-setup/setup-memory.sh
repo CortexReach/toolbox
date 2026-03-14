@@ -223,8 +223,9 @@ show_changelog() {
       .then(releases => {
         if (!Array.isArray(releases)) { console.log('    （无法获取 changelog）'); return; }
         const newer = releases.filter(r => {
-          if (!includeBeta && r.prerelease) return false;
           const ver = (r.tag_name || '').replace(/^v/, '');
+          // 不含 beta 时，同时检查 prerelease 标记和 tag 名含 '-'（防止未勾 pre-release）
+          if (!includeBeta && (r.prerelease || ver.includes('-'))) return false;
           return isNewer(ver, localVer);
         });
         if (newer.length === 0) { console.log('    （无 release notes）'); return; }
