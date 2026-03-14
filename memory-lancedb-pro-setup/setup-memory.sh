@@ -602,7 +602,19 @@ if ! $FRESH_INSTALL && ! $SELFCHECK_ONLY; then
     info "BETA 模式：包含预发布版本 / Including pre-release versions"
   fi
 
-  REMOTE_VER=$(get_remote_version)
+  # 优先从 git 远程分支读真实版本（和实际安装目标一致），fallback 到 tags API
+  REMOTE_VER=""
+  if [[ -d "$PLUGIN_DIR/.git" && -n "${PLUGIN_REF:-}" ]]; then
+    REMOTE_VER=$(git -C "$PLUGIN_DIR" show "origin/$PLUGIN_REF:package.json" 2>/dev/null \
+      | P_JSON=/dev/stdin node -e "
+        const fs = require('fs');
+        try { console.log(JSON.parse(fs.readFileSync('/dev/stdin','utf8')).version); }
+        catch(e) { console.log(''); }
+      " 2>/dev/null || echo "")
+  fi
+  if [[ -z "$REMOTE_VER" ]]; then
+    REMOTE_VER=$(get_remote_version)
+  fi
 
   if [[ -z "$REMOTE_VER" ]]; then
     warn "无法获取远程版本信息，跳过升级检测 / Cannot fetch remote version, skipping upgrade check."
