@@ -103,7 +103,7 @@ dry()     { echo -e "${YELLOW}[DRY-RUN]${NC} 将会执行 / Would run: $1"; }
 
 echo ""
 echo -e "${BOLD}========================================${NC}"
-echo -e "${BOLD}  memory-lancedb-pro 安装/升级向导 / Setup Wizard v3.2${NC}"
+echo -e "${BOLD}  memory-lancedb-pro 安装/升级向导 / Setup Wizard v3.4${NC}"
 echo -e "${BOLD}========================================${NC}"
 if $DRY_RUN; then
   echo -e "${YELLOW}  ⚡ DRY-RUN 模式：只展示操作，不实际执行 / Show actions only, no changes${NC}"
