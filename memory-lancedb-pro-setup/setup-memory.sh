@@ -562,6 +562,22 @@ if [[ -d "$PLUGIN_DIR" && -f "$PLUGIN_DIR/package.json" ]]; then
   LOCAL_VER=$(node -e "console.log(require('$PLUGIN_DIR/package.json').version)" 2>/dev/null || echo "unknown")
   success "检测到已安装版本 / Installed version: v$LOCAL_VER"
   info "插件路径 / Plugin path: $PLUGIN_DIR"
+
+  # 检查配置是否完整（插件目录在但 openclaw.json 里没注册）
+  CONFIG_MISSING=false
+  if [[ -f "$OPENCLAW_JSON" ]]; then
+    HAS_ENTRY=$(node -e "
+      try {
+        const d = JSON.parse(require('fs').readFileSync('$OPENCLAW_JSON','utf8'));
+        const e = d?.plugins?.entries?.['memory-lancedb-pro'];
+        process.stdout.write(e ? 'yes' : 'no');
+      } catch(e) { process.stdout.write('no'); }
+    " 2>/dev/null)
+    if [[ "$HAS_ENTRY" != "yes" ]]; then
+      CONFIG_MISSING=true
+      warn "插件目录存在但配置缺失，将补写配置 / Plugin dir exists but config missing, will re-register."
+    fi
+  fi
 else
   info "未检测到已安装版本，将执行全新安装 / No existing installation, will do fresh install."
   info "新安装路径 / Install path: $PLUGIN_DIR"
@@ -638,8 +654,8 @@ if ! $FRESH_INSTALL && [[ -n "${OLD_HEAD:-}" ]] && [[ "$OLD_HEAD" != "$(git -C "
   fi
 fi
 
-# ── 以下步骤：全新安装才需要（已安装用户跳过） ──
-if $FRESH_INSTALL; then
+# ── 以下步骤：全新安装 或 配置缺失时需要 ──
+if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
 
   # selfcheck-only 提前退出
   if $SELFCHECK_ONLY && [[ ! -f "$SELF_CHECK_SCRIPT" ]]; then
@@ -1340,7 +1356,7 @@ fi  # end of FRESH_INSTALL block
 
 # ── 重启 Gateway ──
 NEED_GATEWAY_RESTART=true
-if ! $FRESH_INSTALL && ! $UPGRADE_DONE; then
+if ! $FRESH_INSTALL && ! $UPGRADE_DONE && ! ${CONFIG_MISSING:-false}; then
   NEED_GATEWAY_RESTART=false
 fi
 
