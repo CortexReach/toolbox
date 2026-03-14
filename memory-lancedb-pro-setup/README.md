@@ -85,47 +85,12 @@ bash setup-memory.sh
 
 ## Key Features
 
-### Schema Dynamic Filter (v3.1+)
-
-The script reads the installed plugin's `openclaw.plugin.json` and filters generated config against its `configSchema`. Any field not declared in the schema (with `additionalProperties: false`) is automatically removed with a warning.
-
-> 脚本会读取已安装插件的 schema，自动裁剪不支持的字段。之前报 `must NOT have additional properties` 的问题彻底解决。
-
-### Version Locking (v3.1+)
-
-```bash
-bash setup-memory.sh --ref v1.1.0-beta.8   # Pin to a specific tag
-bash setup-memory.sh --ref master           # Explicit branch
-bash setup-memory.sh                        # Default: auto-detect remote default branch
-```
-
-### Git Auto-Update (v3.2)
-
-If the plugin directory is a git repo (from a previous `git clone`), the script automatically:
-1. Detects the remote default branch (`main` or `master`)
-2. `git fetch origin`
-3. `git checkout <target>` + `git pull`
-4. Reinstalls npm dependencies if HEAD changed
-
-> 之前 git clone 的用户不需要手动 fetch，脚本自动帮你更新到最新。
-
-### Workspace Fallback (v3.2)
-
-When `openclaw config get` fails (e.g., due to invalid config), the script falls back to:
-1. Parse `openclaw.json` directly with Node.js
-2. Guess common default paths (`~/.openclaw/workspace`)
-3. Ask the user as last resort
-
-### Plugin Path Auto-Detection (v3.0+)
-
-Searches for the plugin in:
-1. Registered paths in `openclaw.json` → `plugins.load.paths`
-2. `find` under workspace (covers `extensions/`, `plugins/`, custom dirs)
-3. Default `$WORKSPACE/plugins/memory-lancedb-pro`
-
-### Multi-Provider Support (v3.0+)
-
-Quick-start presets for: **Jina** / **DashScope** / **SiliconFlow** / **OpenAI** / **Ollama**
+- **Schema filter** — auto-remove unsupported config fields before writing, no more `additional properties` errors
+- **Git auto-update** — existing git repos auto fetch + checkout to latest, detects `main` vs `master`
+- **Version locking** — `--ref v1.2.0` to pin a specific version
+- **Workspace fallback** — works even when `openclaw` CLI is broken by invalid config
+- **Plugin path detection** — finds your plugin in `extensions/`, `plugins/`, or custom dirs
+- **Multi-provider** — presets for Jina / DashScope / SiliconFlow / OpenAI / Ollama, or any OpenAI-compatible API
 
 Or enter any OpenAI-compatible API endpoint manually.
 
