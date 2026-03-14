@@ -32,7 +32,7 @@
 #    - 没有 jq 则降级为手动模式
 #    - 升级失败自动回滚到旧版本
 #
-#  文档：docs/complete-guide-cn.md
+#  文档：https://github.com/CortexReach/toolbox/tree/main/memory-lancedb-pro-setup
 # ============================================================
 
 set -euo pipefail
@@ -1427,7 +1427,6 @@ else
   echo -e "${YELLOW}${BOLD}  $PASS/$TOTAL 通过${NC}"
   echo ""
   echo "  请检查上方未通过的项目。"
-  echo "  常见问题解答：docs/complete-guide-cn.md 第七章"
   echo ""
   if [[ -n "${BACKUP_FILE:-}" ]]; then
     echo "  如需还原配置：cp $BACKUP_FILE $OPENCLAW_JSON"
