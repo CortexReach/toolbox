@@ -243,6 +243,46 @@ show_changelog() {
   echo ""
 }
 
+# Schema 动态过滤：按插件 configSchema 递归裁剪不合法字段
+filter_config_by_schema() {
+  local CONFIG_JSON_INPUT="$1"
+  local MANIFEST_PATH="$2"
+
+  [[ -f "$MANIFEST_PATH" ]] || { warn "找不到插件 manifest / Plugin manifest not found: $MANIFEST_PATH"; return 1; }
+
+  CONFIG_JSON_ENV="$CONFIG_JSON_INPUT" MANIFEST_PATH_ENV="$MANIFEST_PATH" node - <<'NODE'
+const fs = require('fs');
+const manifest = JSON.parse(fs.readFileSync(process.env.MANIFEST_PATH_ENV, 'utf8'));
+const config = JSON.parse(process.env.CONFIG_JSON_ENV);
+const removed = [];
+
+function walk(obj, schema, path) {
+  if (!schema || typeof schema !== 'object') return obj;
+  if (obj === null || obj === undefined) return obj;
+  if (Array.isArray(obj)) return obj;
+  if (typeof obj !== 'object') return obj;
+
+  const props = schema.properties || {};
+  const allowAdditional = schema.additionalProperties !== false;
+  const out = {};
+
+  for (const [key, value] of Object.entries(obj)) {
+    if (Object.prototype.hasOwnProperty.call(props, key)) {
+      out[key] = walk(value, props[key], path ? `${path}.${key}` : key);
+    } else if (allowAdditional) {
+      out[key] = value;
+    } else {
+      removed.push(path ? `${path}.${key}` : key);
+    }
+  }
+  return out;
+}
+
+const filtered = walk(config, manifest.configSchema || {}, 'config');
+process.stdout.write(JSON.stringify({ filtered, removed }, null, 2));
+NODE
+}
+
 # 升级插件（备份 swap + 回滚）
 upgrade_plugin() {
   local install_dir="$1"
@@ -1225,45 +1265,6 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
   fi
 
   # ── 第 9.5 步：Schema 动态过滤 ──
-
-  filter_config_by_schema() {
-    local CONFIG_JSON_INPUT="$1"
-    local MANIFEST_PATH="$2"
-
-    [[ -f "$MANIFEST_PATH" ]] || { warn "找不到插件 manifest / Plugin manifest not found: $MANIFEST_PATH"; return 1; }
-
-    CONFIG_JSON_ENV="$CONFIG_JSON_INPUT" MANIFEST_PATH_ENV="$MANIFEST_PATH" node - <<'NODE'
-const fs = require('fs');
-const manifest = JSON.parse(fs.readFileSync(process.env.MANIFEST_PATH_ENV, 'utf8'));
-const config = JSON.parse(process.env.CONFIG_JSON_ENV);
-const removed = [];
-
-function walk(obj, schema, path) {
-  if (!schema || typeof schema !== 'object') return obj;
-  if (obj === null || obj === undefined) return obj;
-  if (Array.isArray(obj)) return obj;
-  if (typeof obj !== 'object') return obj;
-
-  const props = schema.properties || {};
-  const allowAdditional = schema.additionalProperties !== false;
-  const out = {};
-
-  for (const [key, value] of Object.entries(obj)) {
-    if (Object.prototype.hasOwnProperty.call(props, key)) {
-      out[key] = walk(value, props[key], path ? `${path}.${key}` : key);
-    } else if (allowAdditional) {
-      out[key] = value;
-    } else {
-      removed.push(path ? `${path}.${key}` : key);
-    }
-  }
-  return out;
-}
-
-const filtered = walk(config, manifest.configSchema || {}, 'config');
-process.stdout.write(JSON.stringify({ filtered, removed }, null, 2));
-NODE
-  }
 
   if ! $DRY_RUN && [[ -f "$PLUGIN_MANIFEST" ]]; then
     # 过滤前校验
