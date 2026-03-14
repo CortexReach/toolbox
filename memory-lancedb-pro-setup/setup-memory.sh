@@ -1,44 +1,64 @@
 #!/usr/bin/env bash
 # ============================================================
-#  memory-lancedb-pro 一键安装脚本（全自动版） v1.1
+#  memory-lancedb-pro 一键安装 / 升级脚本 v3.0
 #
 #  用法：
-#    bash setup-memory.sh            # 正常安装
+#    bash setup-memory.sh            # 安装（已安装则进入升级模式）
+#    bash setup-memory.sh --beta     # 允许升级到 beta 版本
 #    bash setup-memory.sh --dry-run  # 只展示会做什么，不实际执行
 #    bash setup-memory.sh --selfcheck-only  # 只跑能力自检，不改配置
 #    bash setup-memory.sh --uninstall # 还原配置并移除插件
+#
+#  v3.0 变化：
+#    - 通用端口探测：支持任意 OpenAI 兼容 API
+#    - 快捷入口：Jina / DashScope / SiliconFlow / OpenAI / Ollama
+#    - config validate：安装/升级后自动校验配置字段
+#    - gen_config 从硬编码模板改为动态生成
 #
 #  安全机制：
 #    - 改 openclaw.json 前自动备份
 #    - 用 jq 做深度合并，已有配置不覆盖
 #    - 检测到已有 memory 插件时停下来问用户
 #    - 没有 jq 则降级为手动模式
+#    - 升级失败自动回滚到旧版本
 #
 #  文档：docs/complete-guide-cn.md
 # ============================================================
 
 set -euo pipefail
 
+# ── 临时文件清理（含 API Key，必须清理） ──
+_TMPFILES=()
+cleanup_tmp() { for f in "${_TMPFILES[@]}"; do rm -f "$f" 2>/dev/null; done; }
+trap cleanup_tmp EXIT
+
 # ── 参数解析 ──
 DRY_RUN=false
 UNINSTALL=false
 SELFCHECK_ONLY=false
+INCLUDE_BETA=false
 for arg in "$@"; do
   case "$arg" in
     --dry-run)   DRY_RUN=true ;;
     --uninstall) UNINSTALL=true ;;
     --selfcheck-only) SELFCHECK_ONLY=true ;;
+    --beta)      INCLUDE_BETA=true ;;
   esac
 done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SELF_CHECK_SCRIPT="$SCRIPT_DIR/scripts/memory-selfcheck.mjs"
+PROBE_SCRIPT="$SCRIPT_DIR/scripts/probe-endpoint.mjs"
+VALIDATE_SCRIPT="$SCRIPT_DIR/scripts/config-validate.mjs"
+GITHUB_REPO="CortexReach/memory-lancedb-pro"
+GITHUB_URL="https://github.com/$GITHUB_REPO.git"
 
 # ── 颜色输出 ──
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
@@ -50,12 +70,276 @@ dry()     { echo -e "${YELLOW}[DRY-RUN]${NC} 将会执行: $1"; }
 
 echo ""
 echo -e "${BOLD}========================================${NC}"
-echo -e "${BOLD}  memory-lancedb-pro 一键安装向导${NC}"
+echo -e "${BOLD}  memory-lancedb-pro 安装 / 升级向导 v3.0${NC}"
 echo -e "${BOLD}========================================${NC}"
 if $DRY_RUN; then
   echo -e "${YELLOW}  ⚡ DRY-RUN 模式：只展示操作，不实际执行${NC}"
 fi
+if $INCLUDE_BETA; then
+  echo -e "${CYAN}  🧪 BETA 模式：包含预发布版本${NC}"
+fi
 echo ""
+
+# ============================================================
+#  公共函数
+# ============================================================
+
+# semver 比较：$1 < $2 返回 0（需要更新），否则返回 1
+needs_update() {
+  node -e "
+    const parse = v => {
+      const [core, pre] = v.split('-');
+      const nums = core.split('.').map(Number);
+      return { nums, pre: pre || '' };
+    };
+    const l = parse('$1'), r = parse('$2');
+    for (let i = 0; i < 3; i++) {
+      if ((l.nums[i]||0) < (r.nums[i]||0)) process.exit(0);
+      if ((l.nums[i]||0) > (r.nums[i]||0)) process.exit(1);
+    }
+    if (l.pre && !r.pre) process.exit(0);
+    if (!l.pre && r.pre) process.exit(1);
+    const lNum = parseInt((l.pre.match(/\d+$/) || ['0'])[0]);
+    const rNum = parseInt((r.pre.match(/\d+$/) || ['0'])[0]);
+    process.exit(lNum < rNum ? 0 : 1);
+  " 2>/dev/null
+}
+
+# 获取远程最新版本号
+get_remote_version() {
+  local ver=""
+
+  if $INCLUDE_BETA; then
+    ver=$(node -e "
+      fetch('https://api.github.com/repos/$GITHUB_REPO/tags?per_page=30')
+        .then(r => r.json())
+        .then(tags => {
+          if (!Array.isArray(tags) || tags.length === 0) { console.log(''); return; }
+          const parsed = tags.map(t => {
+            const v = (t.name || '').replace(/^v/, '');
+            const [core, pre] = v.split('-');
+            const nums = (core || '').split('.').map(Number);
+            const preNum = pre ? parseInt((pre.match(/\d+$/) || ['0'])[0]) : Infinity;
+            return { v, nums, preNum, hasPre: !!pre };
+          });
+          parsed.sort((a, b) => {
+            for (let i = 0; i < 3; i++) {
+              if ((a.nums[i]||0) !== (b.nums[i]||0)) return (b.nums[i]||0) - (a.nums[i]||0);
+            }
+            if (!a.hasPre && b.hasPre) return -1;
+            if (a.hasPre && !b.hasPre) return 1;
+            return b.preNum - a.preNum;
+          });
+          console.log(parsed[0]?.v || '');
+        })
+        .catch(() => console.log(''));
+    " 2>/dev/null)
+  else
+    ver=$(node -e "
+      fetch('https://api.github.com/repos/$GITHUB_REPO/releases/latest')
+        .then(r => r.json())
+        .then(d => console.log((d.tag_name || '').replace(/^v/, '')))
+        .catch(() => console.log(''));
+    " 2>/dev/null)
+  fi
+
+  # fallback：git ls-remote
+  if [[ -z "$ver" ]]; then
+    if $INCLUDE_BETA; then
+      ver=$(git ls-remote --tags "$GITHUB_URL" 2>/dev/null \
+        | awk '{print $2}' | sed 's|refs/tags/||;s|\^{}||' | sed 's/^v//' \
+        | sort -V | tail -1)
+    else
+      ver=$(git ls-remote --tags "$GITHUB_URL" 2>/dev/null \
+        | awk '{print $2}' | sed 's|refs/tags/||;s|\^{}||' | sed 's/^v//' \
+        | grep -v '-' | sort -V | tail -1)
+    fi
+  fi
+
+  echo "$ver"
+}
+
+# 展示 changelog
+show_changelog() {
+  local local_ver="$1"
+  local include_beta="$2"
+
+  echo ""
+  echo -e "  ${BOLD}更新日志 / Changelog:${NC}"
+  echo ""
+
+  node -e "
+    const localVer = '$local_ver';
+    const includeBeta = $include_beta;
+
+    function isNewer(a, b) {
+      const pa = (a.split('-')[0] || '').split('.').map(Number);
+      const pb = (b.split('-')[0] || '').split('.').map(Number);
+      for (let i = 0; i < 3; i++) {
+        if ((pa[i]||0) > (pb[i]||0)) return true;
+        if ((pa[i]||0) < (pb[i]||0)) return false;
+      }
+      const preA = a.includes('-') ? a.split('-').slice(1).join('-') : '';
+      const preB = b.includes('-') ? b.split('-').slice(1).join('-') : '';
+      if (!preA && preB) return true;
+      if (preA && !preB) return false;
+      const numA = parseInt((preA.match(/\d+$/) || ['0'])[0]);
+      const numB = parseInt((preB.match(/\d+$/) || ['0'])[0]);
+      return numA > numB;
+    }
+
+    fetch('https://api.github.com/repos/$GITHUB_REPO/releases?per_page=30')
+      .then(r => r.json())
+      .then(releases => {
+        if (!Array.isArray(releases)) { console.log('    （无法获取 changelog）'); return; }
+        const newer = releases.filter(r => {
+          if (!includeBeta && r.prerelease) return false;
+          const ver = (r.tag_name || '').replace(/^v/, '');
+          return isNewer(ver, localVer);
+        });
+        if (newer.length === 0) { console.log('    （无 release notes）'); return; }
+        const show = newer.slice(0, 8);
+        show.forEach(r => {
+          const ver = (r.tag_name || '').padEnd(22);
+          const name = (r.name || '(no title)').substring(0, 55);
+          const pre = r.prerelease ? ' [beta]' : '';
+          console.log('    ' + ver + name + pre);
+        });
+        if (newer.length > 8) console.log('    ...还有 ' + (newer.length - 8) + ' 个版本');
+      })
+      .catch(() => console.log('    （无法获取 changelog）'));
+  " 2>/dev/null
+  echo ""
+}
+
+# 升级插件（备份 swap + 回滚）
+upgrade_plugin() {
+  local install_dir="$1"
+  local old_ver="$2"
+  local backup_dir="${install_dir}.backup.$(date +%Y%m%d_%H%M%S)"
+  local tmp_dir
+  tmp_dir=$(mktemp -d)
+
+  info "开始升级 / Starting upgrade..."
+
+  info "正在下载新版本，请稍候 / Downloading new version..."
+  if ! git clone --depth 1 --quiet "$GITHUB_URL" "$tmp_dir/plugin" 2>&1; then
+    warn "GitHub clone 失败，尝试镜像 / GitHub failed, trying mirror..."
+    if ! git clone --depth 1 --quiet "https://ghproxy.com/$GITHUB_URL" "$tmp_dir/plugin" 2>&1; then
+      rm -rf "$tmp_dir"
+      warn "下载失败，保持当前版本 $old_ver / Download failed, keeping v$old_ver"
+      return 1
+    fi
+  fi
+
+  if ! (cd "$tmp_dir/plugin" && npm install --loglevel=warn 2>&1); then
+    warn "npm install 失败，尝试镜像 / npm install failed, trying mirror..."
+    if ! (cd "$tmp_dir/plugin" && npm install --loglevel=warn --registry https://registry.npmmirror.com 2>&1); then
+      rm -rf "$tmp_dir"
+      warn "依赖安装失败，保持当前版本 $old_ver / Deps failed, keeping v$old_ver"
+      return 1
+    fi
+  fi
+
+  local new_ver
+  new_ver=$(node -e "console.log(require('$tmp_dir/plugin/package.json').version)" 2>/dev/null || echo "")
+  if [[ -z "$new_ver" ]]; then
+    rm -rf "$tmp_dir"
+    warn "新版本健康检查失败，保持当前版本 $old_ver / Health check failed, keeping v$old_ver"
+    return 1
+  fi
+
+  mv "$install_dir" "$backup_dir"
+  success "旧版本已备份 / Old version backed up → $backup_dir"
+
+  mv "$tmp_dir/plugin" "$install_dir"
+  rm -rf "$tmp_dir"
+
+  if node -e "require('$install_dir/package.json')" 2>/dev/null; then
+    success "升级完成 / Upgrade complete: $old_ver → $new_ver"
+    if [[ -d "$HOME/.Trash" ]]; then
+      mv "$backup_dir" "$HOME/.Trash/" 2>/dev/null || true
+    fi
+    return 0
+  else
+    warn "升级后验证失败，正在回滚 / Post-upgrade check failed, rolling back..."
+    rm -rf "$install_dir"
+    mv "$backup_dir" "$install_dir"
+    warn "已回滚到 $old_ver / Rolled back to v$old_ver"
+    return 1
+  fi
+}
+
+# jq 安全写入
+jq_safe_write() {
+  local filter="$1"
+  local target="$2"
+  jq "$filter" "$target" > "${target}.tmp" || { rm -f "${target}.tmp"; return 1; }
+  if jq empty "${target}.tmp" 2>/dev/null; then
+    mv "${target}.tmp" "$target" || { rm -f "${target}.tmp"; warn "写入失败 / Write failed: $target"; return 1; }
+  else
+    rm -f "${target}.tmp"
+    warn "jq 输出格式异常，已中止 / jq output invalid, aborted"
+    return 1
+  fi
+}
+
+# 展示单个功能状态
+show_feature() {
+  local status="$1" name="$2" desc="$3" extra="${4:-}"
+  if [[ "$status" == "on" ]]; then
+    if [[ -n "$extra" ]]; then
+      echo -e "    ${GREEN}[ON]${NC}  $name — $desc ($extra)"
+    else
+      echo -e "    ${GREEN}[ON]${NC}  $name — $desc"
+    fi
+  else
+    if [[ -n "$extra" ]]; then
+      echo -e "    ${YELLOW}[OFF]${NC} $name — $desc $extra"
+    else
+      echo -e "    ${YELLOW}[OFF]${NC} $name — $desc"
+    fi
+  fi
+}
+
+# 探测插件实际安装路径（兼容 extensions/ / plugins/ / 任意自定义路径）
+# 优先级：openclaw.json load.paths → workspace 下搜索 → 默认 plugins/
+detect_plugin_dir() {
+  local ws="$1"
+  local oc_json="${2:-$HOME/.openclaw/openclaw.json}"
+
+  # 1. 从 openclaw.json 的 plugins.load.paths 里找已注册路径
+  if command -v jq &>/dev/null && [[ -f "$oc_json" ]]; then
+    local registered
+    registered=$(jq -r '.plugins.load.paths[]? // empty' "$oc_json" 2>/dev/null \
+      | while IFS= read -r p; do
+          # 展开 ~ 开头的路径
+          eval p="$p" 2>/dev/null || true
+          if [[ -f "$p/package.json" ]] && grep -q '"memory-lancedb-pro"' "$p/package.json" 2>/dev/null; then
+            echo "$p"
+            break
+          fi
+        done)
+    if [[ -n "$registered" ]]; then
+      echo "$registered"
+      return 0
+    fi
+  fi
+
+  # 2. 在 workspace 下搜索（兼容 extensions/ / plugins/ / 其他子目录）
+  if [[ -n "$ws" && -d "$ws" ]]; then
+    local found
+    found=$(find "$ws" -maxdepth 3 -name package.json -path "*/memory-lancedb-pro/*" -print -quit 2>/dev/null)
+    if [[ -n "$found" ]]; then
+      echo "$(dirname "$found")"
+      return 0
+    fi
+  fi
+
+  # 3. 没找到 → 返回默认路径（新安装用）
+  echo "$ws/plugins/memory-lancedb-pro"
+  return 1  # 返回 1 表示是猜测的默认值，没找到已有安装
+}
 
 # ============================================================
 #  卸载流程
@@ -68,7 +352,6 @@ if $UNINSTALL; then
     fail "找不到 $OPENCLAW_JSON"
   fi
 
-  # 查找最近的备份
   LATEST_BACKUP=$(ls -t "$OPENCLAW_JSON".backup.* 2>/dev/null | head -1 || echo "")
 
   if [[ -n "$LATEST_BACKUP" ]]; then
@@ -88,15 +371,13 @@ if $UNINSTALL; then
     echo "  如果要手动清理，请编辑 $OPENCLAW_JSON 删除 memory-lancedb-pro 相关配置。"
   fi
 
-  # 询问是否删除插件目录
   WORKSPACE=$(openclaw config get agents.defaults.workspace 2>/dev/null | tr -d '"' | tr -d ' ' || echo "")
-  PLUGIN_DIR="$WORKSPACE/plugins/memory-lancedb-pro"
+  PLUGIN_DIR=$(detect_plugin_dir "$WORKSPACE" "$OPENCLAW_JSON")
   if [[ -d "$PLUGIN_DIR" ]]; then
     echo ""
     read -p "  要删除插件目录 $PLUGIN_DIR 吗？(y/n) [n]: " DEL_PLUGIN
     DEL_PLUGIN=${DEL_PLUGIN:-n}
     if [[ "$DEL_PLUGIN" == "y" || "$DEL_PLUGIN" == "Y" ]]; then
-      # 移到 Trash 而不是 rm -rf
       if [[ -d "$HOME/.Trash" ]]; then
         mv "$PLUGIN_DIR" "$HOME/.Trash/memory-lancedb-pro.$(date +%Y%m%d_%H%M%S)"
         success "插件目录已移到废纸篓"
@@ -113,13 +394,12 @@ if $UNINSTALL; then
 fi
 
 # ============================================================
-#  安装流程
+#  安装 / 升级流程
 # ============================================================
 
 # ── 第 1 步：环境检查 ──
-info "第 1 步：环境检查..."
+info "第 1 步：环境检查 / Environment check..."
 
-# 检查 node
 if ! command -v node &>/dev/null; then
   fail "找不到 node。请先安装 Node.js（推荐 v18+）：https://nodejs.org"
 fi
@@ -129,15 +409,13 @@ success "Node.js $NODE_VER"
 if $SELFCHECK_ONLY; then
   warn "--selfcheck-only 模式将跳过 OpenClaw / workspace / 插件安装，只做能力探测。"
 else
-  # 检查 openclaw
   command -v openclaw >/dev/null 2>&1 || fail "找不到 openclaw 命令，请先安装 OpenClaw。"
   success "openclaw CLI 已找到"
 
-  # 检查 npm
   command -v npm &>/dev/null || fail "找不到 npm，请重新安装 Node.js。"
 fi
 
-# 检查 jq（关键：决定能否自动改配置）
+# 检查 jq
 HAS_JQ=false
 if ! $SELFCHECK_ONLY && command -v jq &>/dev/null; then
   HAS_JQ=true
@@ -149,7 +427,7 @@ fi
 
 # ── 第 2 步：确认 workspace ──
 echo ""
-info "第 2 步：确认 workspace 路径..."
+info "第 2 步：确认 workspace 路径 / Confirm workspace..."
 
 if $SELFCHECK_ONLY; then
   WORKSPACE=""
@@ -165,297 +443,607 @@ else
   success "workspace: $WORKSPACE"
 fi
 
-PLUGIN_DIR="$WORKSPACE/plugins/memory-lancedb-pro"
 OPENCLAW_JSON="$HOME/.openclaw/openclaw.json"
+PLUGIN_DIR=$(detect_plugin_dir "$WORKSPACE" "$OPENCLAW_JSON")
 
-# ── 第 3 步：安装模式 ──
+# ── 第 3 步：检测已安装版本 ──
 echo ""
-info "第 3 步：安装模式..."
-echo ""
-echo -e "  ${BOLD}1) auto-probe${NC}        — 自动探测 embedding / rerank 能力并推荐模板 ${GREEN}← 推荐${NC}"
-echo -e "  ${BOLD}2) manual${NC}            — 我自己选模板"
-echo ""
-read -p "输入数字 (1/2)，直接回车选 1: " MODE_CHOICE
-MODE_CHOICE=${MODE_CHOICE:-1}
+info "第 3 步：检测已安装版本 / Detecting installed version..."
 
-case "$MODE_CHOICE" in
-  1) PROFILE_MODE="auto-probe" ;;
-  2) PROFILE_MODE="manual" ;;
-  *) fail "无效选择，请输入 1 或 2。" ;;
-esac
-success "安装模式：$PROFILE_MODE"
+FRESH_INSTALL=true
+LOCAL_VER="0.0.0"
+UPGRADE_DONE=false
 
-# ── 第 4 步：获取 Jina API Key ──
-echo ""
-info "第 4 步：Jina API Key..."
-echo ""
-echo "  Jina 是记忆检索用的 embedding 服务，免费注册就能用。"
-echo "  注册地址：https://jina.ai/"
-echo "  如果暂时没有，直接回车跳过（之后手动填）。"
-echo ""
-read -p "JINA_API_KEY: " JINA_KEY
-
-if [[ -z "$JINA_KEY" ]]; then
-  warn "未填写 Key，配置里保留占位符 YOUR_JINA_API_KEY，记得之后替换。"
-  JINA_KEY="YOUR_JINA_API_KEY"
+if [[ -d "$PLUGIN_DIR" && -f "$PLUGIN_DIR/package.json" ]]; then
+  FRESH_INSTALL=false
+  LOCAL_VER=$(node -e "console.log(require('$PLUGIN_DIR/package.json').version)" 2>/dev/null || echo "unknown")
+  success "检测到已安装版本 / Installed version: v$LOCAL_VER"
+  info "插件路径 / Plugin path: $PLUGIN_DIR"
 else
-  if [[ "$JINA_KEY" != jina_* ]]; then
-    warn "Key 不是以 jina_ 开头，请确认是否正确。"
-    read -p "  继续？(y/n) [y]: " CONFIRM
-    [[ "${CONFIRM:-y}" =~ ^[yY]$ ]] || fail "用户取消。"
-  fi
-  success "API Key 已记录"
+  info "未检测到已安装版本，将执行全新安装 / No existing installation, will do fresh install."
+  info "新安装路径 / Install path: $PLUGIN_DIR"
 fi
 
-# ── 第 5 步：能力自检 / 选模板 ──
-echo ""
-info "第 5 步：能力自检 / 选模板..."
+# ── 第 4 步：版本对比 + 升级（仅已安装时） ──
+if ! $FRESH_INSTALL && ! $SELFCHECK_ONLY; then
+  echo ""
+  info "第 4 步：检查新版本 / Checking for updates..."
 
-TEMPLATE=""
-SELFCHECK_REPORT=""
-
-run_selfcheck() {
-  local INPUT_JSON="$1"
-  local REPORT_JSON="$2"
-
-  if [[ ! -f "$SELF_CHECK_SCRIPT" ]]; then
-    warn "找不到自检脚本：$SELF_CHECK_SCRIPT"
-    return 1
+  if $INCLUDE_BETA; then
+    info "BETA 模式：包含预发布版本 / Including pre-release versions"
   fi
 
-  node "$SELF_CHECK_SCRIPT" --config "$INPUT_JSON" --output "$REPORT_JSON"
-}
+  REMOTE_VER=$(get_remote_version)
 
-choose_template_manually() {
-  echo ""
-  echo -e "  ${BOLD}1) lite-safe${NC}        — 第一次装 / 弱模型 / 先存不召回 ${GREEN}← 推荐新手${NC}"
-  echo -e "  ${BOLD}2) balanced-default${NC} — 大多数人 / 存+召回 / 不开 rerank"
-  echo -e "  ${BOLD}3) pro-rerank${NC}       — GPT-4/Claude / 追求召回质量 / 开 rerank"
-  echo ""
-  read -p "输入数字 (1/2/3)，直接回车选 1: " TEMPLATE_CHOICE
-  TEMPLATE_CHOICE=${TEMPLATE_CHOICE:-1}
+  if [[ -z "$REMOTE_VER" ]]; then
+    warn "无法获取远程版本信息，跳过升级检测 / Cannot fetch remote version, skipping upgrade check."
+  elif [[ "$LOCAL_VER" == "$REMOTE_VER" ]]; then
+    success "已是最新版本 / Already up to date: v$LOCAL_VER"
+  elif needs_update "$LOCAL_VER" "$REMOTE_VER"; then
+    echo ""
+    echo -e "  ${BOLD}发现新版本 / New version available:${NC}"
+    echo -e "    当前 / Current: ${YELLOW}v$LOCAL_VER${NC}"
+    echo -e "    最新 / Latest:  ${GREEN}v$REMOTE_VER${NC}"
 
-  case "$TEMPLATE_CHOICE" in
-    1) TEMPLATE="lite-safe" ;;
-    2) TEMPLATE="balanced-default" ;;
-    3) TEMPLATE="pro-rerank" ;;
-    *) fail "无效选择，请输入 1、2 或 3。" ;;
-  esac
-}
+    BETA_FLAG="false"
+    if $INCLUDE_BETA; then BETA_FLAG="true"; fi
+    show_changelog "$LOCAL_VER" "$BETA_FLAG"
 
-if [[ "$PROFILE_MODE" == "manual" ]]; then
-  choose_template_manually
-  success "已选模板：$TEMPLATE"
-else
-  if [[ "$JINA_KEY" == "YOUR_JINA_API_KEY" ]]; then
-    warn "没有真实 Jina Key，无法跑能力自检，自动回退到 lite-safe。"
-    TEMPLATE="lite-safe"
+    read -p "  是否升级？/ Upgrade now? (y/n) [y]: " DO_UPGRADE
+    DO_UPGRADE=${DO_UPGRADE:-y}
+
+    if [[ "$DO_UPGRADE" =~ ^[yY]$ ]]; then
+      if $DRY_RUN; then
+        dry "备份 $PLUGIN_DIR → ${PLUGIN_DIR}.backup.TIMESTAMP"
+        dry "git clone --depth 1 $GITHUB_URL → 临时目录"
+        dry "npm install"
+        dry "替换插件目录"
+        success "DRY-RUN: 升级步骤展示完毕"
+      else
+        if upgrade_plugin "$PLUGIN_DIR" "$LOCAL_VER"; then
+          UPGRADE_DONE=true
+          LOCAL_VER=$(node -e "console.log(require('$PLUGIN_DIR/package.json').version)" 2>/dev/null || echo "$REMOTE_VER")
+        else
+          echo ""
+          echo "======================================================"
+          warn "升级未成功，当前仍在使用 v$LOCAL_VER"
+          info "旧版本运行正常，不影响使用，可以继续用。"
+          echo "======================================================"
+        fi
+      fi
+    else
+      info "跳过升级，保持 v$LOCAL_VER / Skipping upgrade, keeping v$LOCAL_VER"
+    fi
   else
-    SELFCHECK_INPUT="$(mktemp "${TMPDIR:-/tmp}/memory-selfcheck-input-XXXXXX")"
-    SELFCHECK_REPORT="$(mktemp "${TMPDIR:-/tmp}/memory-selfcheck-report-XXXXXX")"
+    success "本地版本 v$LOCAL_VER 已是最新（或比远程更新）/ Local version is up to date."
+  fi
+fi
 
-    JINA_KEY_ENV="$JINA_KEY" node -e '
-      const fs = require("fs");
-      const outputPath = process.argv[1];
-      const apiKey = process.env.JINA_KEY_ENV;
-      const payload = {
-        metadata: {
-          label: "memory-lancedb-pro beginner installer",
-        },
-        embedding: {
-          apiKey,
-          baseURL: "https://api.jina.ai/v1",
-          model: "jina-embeddings-v5-text-small",
-          dimensions: 1024,
-          queryExtraBody: {
-            task: "retrieval.query",
-            normalized: true,
-          },
-          passageExtraBody: {
-            task: "retrieval.passage",
-            normalized: true,
-          },
-        },
-        rerank: {
-          apiKey,
-          endpoint: "https://api.jina.ai/v1/rerank",
-          model: "jina-reranker-v3",
-        },
-      };
-      fs.writeFileSync(outputPath, JSON.stringify(payload, null, 2) + "\n", "utf8");
-    ' "$SELFCHECK_INPUT"
+# ── 以下步骤：全新安装才需要（已安装用户跳过） ──
+if $FRESH_INSTALL; then
 
-    if $DRY_RUN; then
-      dry "node $SELF_CHECK_SCRIPT --config $SELFCHECK_INPUT --output $SELFCHECK_REPORT"
-      TEMPLATE="balanced-default"
-      warn "DRY-RUN 模式不会真实探测，先假定推荐 balanced-default。"
-    elif run_selfcheck "$SELFCHECK_INPUT" "$SELFCHECK_REPORT"; then
-      TEMPLATE=$(node -p "JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8')).recommendedProfile || 'lite-safe'" "$SELFCHECK_REPORT")
-      success "自动推荐模板：$TEMPLATE"
-      echo "  自检报告：$SELFCHECK_REPORT"
+  # selfcheck-only 提前退出
+  if $SELFCHECK_ONLY && [[ ! -f "$SELF_CHECK_SCRIPT" ]]; then
+    warn "selfcheck 需要先安装插件。"
+    echo "  → 请先运行 bash setup-memory.sh 完成安装，再用 --selfcheck-only"
+    exit 1
+  fi
+
+  # ============================================================
+  #  第 4 步：选择 API 来源（v3.0 核心改动）
+  # ============================================================
+  echo ""
+  info "第 4 步：选择 API 来源 / Choose API provider..."
+  echo ""
+  echo -e "  ${BOLD}你的 embedding 服务是？/ Which embedding service?${NC}"
+  echo ""
+  echo -e "  ── 快捷选择（自动填 URL）──"
+  echo -e "  ${BOLD}1) Jina${NC}              — 免费注册，embedding + rerank 一把梭 ${GREEN}← 推荐${NC}"
+  echo -e "  ${BOLD}2) 阿里云 DashScope${NC}  — 通义系列，国内快"
+  echo -e "  ${BOLD}3) SiliconFlow${NC}       — 国内加速，免费额度大"
+  echo -e "  ${BOLD}4) OpenAI${NC}            — 最省心但最贵"
+  echo ""
+  echo -e "  ── 通用入口 ──"
+  echo -e "  ${BOLD}5) Ollama / 本地模型${NC}  — 零成本，自动探测本地模型"
+  echo -e "  ${BOLD}6) 其他 OpenAI 兼容服务${NC} — 填 baseURL，自动探测"
+  echo ""
+
+  PROVIDER=""
+  PROVIDER_PRESET=""
+  API_BASE_URL=""
+  API_KEY=""
+  EMBEDDING_MODEL=""
+  RERANK_ENDPOINT=""
+  RERANK_API_KEY=""
+  RERANK_MODEL=""
+  RERANK_PROVIDER=""
+
+  while true; do
+    read -p "  输入数字 (1-6)，直接回车选 1: " PROVIDER_CHOICE
+    PROVIDER_CHOICE=${PROVIDER_CHOICE:-1}
+    case "$PROVIDER_CHOICE" in
+      1) PROVIDER="jina";       PROVIDER_PRESET="jina"; break ;;
+      2) PROVIDER="dashscope";  PROVIDER_PRESET="dashscope"; break ;;
+      3) PROVIDER="siliconflow"; PROVIDER_PRESET="siliconflow"; break ;;
+      4) PROVIDER="openai";     PROVIDER_PRESET="openai"; break ;;
+      5) PROVIDER="ollama";     PROVIDER_PRESET="ollama"; break ;;
+      6) PROVIDER="custom";     PROVIDER_PRESET=""; break ;;
+      *) warn "无效选择，请输入 1-6。" ;;
+    esac
+  done
+
+  # ── 按来源获取 baseURL + apiKey ──
+
+  case "$PROVIDER" in
+    jina)
+      API_BASE_URL="https://api.jina.ai/v1"
+      echo ""
+      echo "  Jina 免费注册就能用：https://jina.ai/"
+      echo ""
+      read -p "  请粘贴你的 Jina API Key（直接回车跳过）: " API_KEY
+      if [[ -z "$API_KEY" ]]; then
+        warn "未填写 Key，配置里保留占位符，记得之后替换。"
+        API_KEY="YOUR_JINA_API_KEY"
+      elif [[ "$API_KEY" != jina_* ]]; then
+        warn "Key 不是以 jina_ 开头，请确认是否正确。"
+        read -p "  继续？(y/n) [y]: " CONFIRM
+        [[ "${CONFIRM:-y}" =~ ^[yY]$ ]] || fail "用户取消。"
+      fi
+      RERANK_ENDPOINT="https://api.jina.ai/v1/rerank"
+      RERANK_API_KEY="$API_KEY"
+      RERANK_MODEL="jina-reranker-v3"
+      RERANK_PROVIDER="jina"
+      ;;
+
+    dashscope)
+      API_BASE_URL="https://dashscope.aliyuncs.com/compatible-mode/v1"
+      echo ""
+      echo "  DashScope 控制台：https://dashscope.console.aliyun.com/"
+      echo ""
+      read -p "  请粘贴你的 DashScope API Key: " API_KEY
+      if [[ -z "$API_KEY" ]]; then
+        warn "未填写 Key，配置里保留占位符。"
+        API_KEY="YOUR_API_KEY"
+      fi
+      RERANK_ENDPOINT="https://dashscope.aliyuncs.com/compatible-api/v1/reranks"
+      RERANK_API_KEY="$API_KEY"
+      RERANK_MODEL="qwen3-rerank"
+      RERANK_PROVIDER="jina"
+      ;;
+
+    siliconflow)
+      API_BASE_URL="https://api.siliconflow.cn/v1"
+      echo ""
+      echo "  SiliconFlow 控制台：https://cloud.siliconflow.cn/"
+      echo ""
+      read -p "  请粘贴你的 SiliconFlow API Key: " API_KEY
+      if [[ -z "$API_KEY" ]]; then
+        warn "未填写 Key，配置里保留占位符。"
+        API_KEY="YOUR_API_KEY"
+      fi
+      RERANK_ENDPOINT="https://api.siliconflow.cn/v1/rerank"
+      RERANK_API_KEY="$API_KEY"
+      RERANK_MODEL="BAAI/bge-reranker-v2-m3"
+      RERANK_PROVIDER="siliconflow"
+      ;;
+
+    openai)
+      API_BASE_URL="https://api.openai.com/v1"
+      echo ""
+      echo "  OpenAI 控制台：https://platform.openai.com/api-keys"
+      echo ""
+      read -p "  请粘贴你的 OpenAI API Key: " API_KEY
+      if [[ -z "$API_KEY" ]]; then
+        warn "未填写 Key，配置里保留占位符。"
+        API_KEY="YOUR_API_KEY"
+      fi
+      # OpenAI 没有 rerank
+      ;;
+
+    ollama)
+      echo ""
+      info "检测 Ollama 服务..."
+
+      # 检测 Ollama 是否运行
+      OLLAMA_RUNNING=false
+      if curl -s --max-time 3 http://localhost:11434/api/version >/dev/null 2>&1; then
+        OLLAMA_RUNNING=true
+        success "Ollama 服务正在运行"
+      elif command -v ollama &>/dev/null; then
+        warn "Ollama 已安装但服务未运行。请先运行 'ollama serve'"
+        read -p "  已启动 Ollama？按回车继续，或 Ctrl+C 退出: "
+        if curl -s --max-time 3 http://localhost:11434/api/version >/dev/null 2>&1; then
+          OLLAMA_RUNNING=true
+        else
+          fail "Ollama 服务仍未响应。请先启动 Ollama 再重新运行脚本。"
+        fi
+      else
+        fail "找不到 Ollama。请先安装：https://ollama.com/"
+      fi
+
+      API_BASE_URL="http://localhost:11434/v1"
+      API_KEY="ollama"
+
+      # 列出本地 embedding 模型
+      echo ""
+      info "查询本地模型列表..."
+      OLLAMA_MODELS=$(ollama list 2>/dev/null | tail -n +2 | awk '{print $1}' || echo "")
+
+      if [[ -n "$OLLAMA_MODELS" ]]; then
+        # 筛选 embedding 模型
+        EMBED_MODELS=""
+        ALL_MODELS=""
+        while IFS= read -r model; do
+          ALL_MODELS="$ALL_MODELS $model"
+          # 常见 embedding 模型名称匹配
+          if echo "$model" | grep -qiE 'embed|bge|e5-|gte-|nomic|mxbai'; then
+            EMBED_MODELS="$EMBED_MODELS $model"
+          fi
+        done <<< "$OLLAMA_MODELS"
+
+        if [[ -n "$EMBED_MODELS" ]]; then
+          echo ""
+          echo -e "  ${BOLD}检测到以下 embedding 模型：${NC}"
+          local_n=0
+          declare -a LOCAL_EMBED_LIST=()
+          for m in $EMBED_MODELS; do
+            local_n=$((local_n + 1))
+            LOCAL_EMBED_LIST+=("$m")
+            echo "    $local_n) $m"
+          done
+          echo ""
+          read -p "  选一个（输入编号，回车选 1）: " EMBED_CHOICE
+          EMBED_CHOICE=${EMBED_CHOICE:-1}
+          if [[ "$EMBED_CHOICE" =~ ^[0-9]+$ ]] && [[ "$EMBED_CHOICE" -ge 1 ]] && [[ "$EMBED_CHOICE" -le $local_n ]]; then
+            EMBEDDING_MODEL="${LOCAL_EMBED_LIST[$((EMBED_CHOICE - 1))]}"
+          else
+            EMBEDDING_MODEL="${LOCAL_EMBED_LIST[0]}"
+          fi
+          success "已选模型：$EMBEDDING_MODEL"
+        else
+          echo ""
+          warn "本地没有 embedding 模型。已有模型：$ALL_MODELS"
+          echo ""
+          echo "  推荐拉一个 embedding 模型："
+          echo "    ollama pull nomic-embed-text"
+          echo "    ollama pull mxbai-embed-large"
+          echo ""
+          read -p "  已拉取？输入模型名（或回车用 nomic-embed-text）: " EMBEDDING_MODEL
+          EMBEDDING_MODEL=${EMBEDDING_MODEL:-nomic-embed-text}
+
+          # 自动拉取
+          if ! echo "$ALL_MODELS" | grep -q "$EMBEDDING_MODEL"; then
+            echo ""
+            read -p "  要自动拉取 $EMBEDDING_MODEL 吗？(y/n) [y]: " PULL_IT
+            if [[ "${PULL_IT:-y}" =~ ^[yY]$ ]]; then
+              info "正在拉取 $EMBEDDING_MODEL，请稍候..."
+              if ollama pull "$EMBEDDING_MODEL" 2>&1; then
+                success "模型拉取完成"
+              else
+                fail "拉取失败。请手动运行：ollama pull $EMBEDDING_MODEL"
+              fi
+            fi
+          fi
+        fi
+      else
+        warn "没有检测到任何本地模型。"
+        echo ""
+        echo "  请先拉取一个 embedding 模型："
+        echo "    ollama pull nomic-embed-text"
+        echo ""
+        read -p "  已拉取？输入模型名（或回车用 nomic-embed-text）: " EMBEDDING_MODEL
+        EMBEDDING_MODEL=${EMBEDDING_MODEL:-nomic-embed-text}
+      fi
+      # Ollama 没有 rerank
+      ;;
+
+    custom)
+      echo ""
+      echo "  填写你的 OpenAI 兼容 API 信息："
+      echo "  （支持 LM Studio、vLLM、LocalAI、DeepSeek、Together 等）"
+      echo ""
+      read -p "  API Base URL（如 http://localhost:1234/v1）: " API_BASE_URL
+      [[ -n "$API_BASE_URL" ]] || fail "Base URL 不能为空"
+
+      read -p "  API Key（不需要则直接回车）: " API_KEY
+      API_KEY=${API_KEY:-"no-key"}
+
+      echo ""
+      read -p "  Embedding 模型名（不确定则回车自动探测）: " EMBEDDING_MODEL
+      echo ""
+      echo "  是否有 rerank 服务？"
+      read -p "  Rerank 端点 URL（没有则回车跳过）: " RERANK_ENDPOINT
+      if [[ -n "$RERANK_ENDPOINT" ]]; then
+        read -p "  Rerank 模型名: " RERANK_MODEL
+        RERANK_API_KEY="$API_KEY"
+        RERANK_PROVIDER="jina"  # 默认假设 Jina 格式
+      fi
+      ;;
+  esac
+
+  success "API 来源：$PROVIDER"
+
+  # ============================================================
+  #  第 5 步：能力探测（v3.0 核心改动）
+  # ============================================================
+  echo ""
+  info "第 5 步：能力探测 / Probing API capabilities..."
+
+  PROBE_RESULT="$(mktemp "${TMPDIR:-/tmp}/memory-probe-XXXXXX")"
+  _TMPFILES+=("$PROBE_RESULT")
+
+  # 构建 probe 命令参数
+  PROBE_ARGS=(--baseURL "$API_BASE_URL" --apiKey "$API_KEY" --output "$PROBE_RESULT")
+  if [[ -n "$PROVIDER_PRESET" ]]; then
+    PROBE_ARGS+=(--preset "$PROVIDER_PRESET")
+  fi
+  if [[ -n "$EMBEDDING_MODEL" ]]; then
+    PROBE_ARGS+=(--model "$EMBEDDING_MODEL")
+  fi
+  if [[ -n "$RERANK_ENDPOINT" ]]; then
+    PROBE_ARGS+=(--rerankEndpoint "$RERANK_ENDPOINT")
+    PROBE_ARGS+=(--rerankApiKey "${RERANK_API_KEY:-$API_KEY}")
+    PROBE_ARGS+=(--rerankModel "${RERANK_MODEL:-}")
+    PROBE_ARGS+=(--rerankProvider "${RERANK_PROVIDER:-jina}")
+  fi
+
+  if $DRY_RUN; then
+    dry "node $PROBE_SCRIPT ${PROBE_ARGS[*]}"
+    RECOMMENDED_LEVEL="balanced-default"
+    warn "DRY-RUN 模式不会真实探测，假定推荐 balanced-default。"
+  else
+    info "正在探测，请稍候..."
+    echo ""
+
+    if node "$PROBE_SCRIPT" "${PROBE_ARGS[@]}" 2>/dev/null; then
+      # 解析探测结果
+      PROBE_EMB_OK=$(node -p "JSON.parse(require('fs').readFileSync('$PROBE_RESULT','utf8')).embedding.available" 2>/dev/null || echo "false")
+      PROBE_EMB_MODEL=$(node -p "JSON.parse(require('fs').readFileSync('$PROBE_RESULT','utf8')).embedding.model || 'unknown'" 2>/dev/null || echo "unknown")
+      PROBE_EMB_DIM=$(node -p "JSON.parse(require('fs').readFileSync('$PROBE_RESULT','utf8')).embedding.dimensions || 0" 2>/dev/null || echo "0")
+      PROBE_EMB_MS=$(node -p "JSON.parse(require('fs').readFileSync('$PROBE_RESULT','utf8')).embedding.latencyMs || 0" 2>/dev/null || echo "0")
+      PROBE_RERANK_OK=$(node -p "JSON.parse(require('fs').readFileSync('$PROBE_RESULT','utf8')).rerank.available" 2>/dev/null || echo "false")
+      PROBE_RERANK_MODEL=$(node -p "JSON.parse(require('fs').readFileSync('$PROBE_RESULT','utf8')).rerank.model || ''" 2>/dev/null || echo "")
+      PROBE_RERANK_MS=$(node -p "JSON.parse(require('fs').readFileSync('$PROBE_RESULT','utf8')).rerank.latencyMs || 0" 2>/dev/null || echo "0")
+      RECOMMENDED_LEVEL=$(node -p "JSON.parse(require('fs').readFileSync('$PROBE_RESULT','utf8')).recommendedLevel || 'lite-safe'" 2>/dev/null || echo "lite-safe")
+
+      # 展示探测结果
+      if [[ "$PROBE_EMB_OK" == "true" ]]; then
+        success "Embedding   $PROBE_EMB_MODEL (${PROBE_EMB_DIM}维, ${PROBE_EMB_MS}ms)"
+      else
+        PROBE_EMB_ERR=$(node -p "JSON.parse(require('fs').readFileSync('$PROBE_RESULT','utf8')).embedding.error || '未知错误'" 2>/dev/null || echo "未知错误")
+        warn "Embedding   探测失败: $PROBE_EMB_ERR"
+      fi
+
+      if [[ "$PROBE_RERANK_OK" == "true" ]]; then
+        success "Rerank      $PROBE_RERANK_MODEL (${PROBE_RERANK_MS}ms)"
+      else
+        PROBE_RERANK_REASON=$(node -p "JSON.parse(require('fs').readFileSync('$PROBE_RESULT','utf8')).rerank.reason || '不可用'" 2>/dev/null || echo "不可用")
+        info "Rerank      $PROBE_RERANK_REASON"
+      fi
+
+      echo ""
+
+      if [[ "$PROBE_EMB_OK" != "true" ]]; then
+        # embedding 都不通，提示用户
+        warn "Embedding 探测失败。可能原因："
+        echo "    - API Key 不正确"
+        echo "    - 服务未启动"
+        echo "    - 网络不通"
+        echo ""
+        echo "  可以先选 lite-safe 模板装上，之后调通了重跑脚本。"
+        RECOMMENDED_LEVEL="lite-safe"
+      fi
+
       if $SELFCHECK_ONLY; then
-        success "--selfcheck-only 已完成，不改配置。"
+        echo ""
+        success "--selfcheck-only 完成。探测报告：$PROBE_RESULT"
         exit 0
       fi
     else
-      if [[ -f "$SELFCHECK_REPORT" ]]; then
-        BLOCKING=$(node -p "JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8')).overall?.blocking ? 'true' : 'false'" "$SELFCHECK_REPORT")
-        REASON=$(node -p "JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8')).overall?.reason || '未知错误'" "$SELFCHECK_REPORT")
-        if [[ "$BLOCKING" == "true" ]]; then
-          fail "能力自检未通过：${REASON}。报告：${SELFCHECK_REPORT}"
-        fi
-      fi
-      warn "能力自检没有拿到稳定结论，保守回退到 lite-safe。"
-      TEMPLATE="lite-safe"
+      warn "探测脚本执行失败，使用默认推荐。"
+      RECOMMENDED_LEVEL="balanced-default"
       if $SELFCHECK_ONLY; then
-        fail "--selfcheck-only 模式下自检失败，请先修复上面的错误。"
+        fail "--selfcheck-only 模式下探测失败。"
       fi
     fi
   fi
-fi
 
-if [[ -z "$TEMPLATE" ]]; then
-  fail "没有选出有效模板"
-fi
+  # ============================================================
+  #  第 6 步：选择配置等级
+  # ============================================================
+  echo ""
+  info "第 6 步：选择配置等级 / Choose config level..."
+  echo ""
 
-success "最终模板：$TEMPLATE"
-
-if $SELFCHECK_ONLY; then
-  warn "--selfcheck-only 需要 auto-probe 模式且提供真实 Key。"
-  exit 1
-fi
-
-# ── 第 6 步：克隆插件 ──
-echo ""
-info "第 6 步：下载插件..."
-
-if [[ -d "$PLUGIN_DIR" ]]; then
-  warn "目录已存在，跳过 clone: $PLUGIN_DIR"
-elif $DRY_RUN; then
-  dry "git clone https://github.com/CortexReach/memory-lancedb-pro.git $PLUGIN_DIR"
-else
-  mkdir -p "$WORKSPACE/plugins"
-  if ! git clone https://github.com/CortexReach/memory-lancedb-pro.git "$PLUGIN_DIR" 2>&1; then
-    warn "GitHub clone 失败，尝试国内镜像..."
-    git clone https://ghproxy.com/https://github.com/CortexReach/memory-lancedb-pro.git "$PLUGIN_DIR" \
-      || fail "镜像也失败了。请手动下载 zip 解压到 $PLUGIN_DIR 后重新运行脚本。"
+  # 如果 rerank 不可用，pro-rerank 不推荐
+  PRO_NOTE=""
+  if [[ "${PROBE_RERANK_OK:-false}" != "true" ]]; then
+    PRO_NOTE=" ${YELLOW}(需要 rerank 能力)${NC}"
   fi
-  success "插件下载完成"
-fi
 
-# ── 第 7 步：安装依赖 ──
-echo ""
-info "第 7 步：安装依赖..."
+  echo -e "  ${BOLD}1) lite-safe${NC}        — 先存不召回，跑稳了再升 ${GREEN}← 新手推荐${NC}"
+  echo -e "  ${BOLD}2) balanced-default${NC} — 存+召回，大多数人适用"
+  echo -e "  ${BOLD}3) pro-rerank${NC}       — 追求召回质量$PRO_NOTE"
+  echo ""
 
-if $DRY_RUN; then
-  dry "cd $PLUGIN_DIR && npm install"
-elif [[ -d "$PLUGIN_DIR/node_modules" ]]; then
-  warn "node_modules 已存在，跳过。"
-else
-  cd "$PLUGIN_DIR"
-  if ! npm install 2>&1; then
-    warn "默认源失败，切换国内镜像..."
-    npm install --registry https://registry.npmmirror.com 2>&1 \
-      || fail "npm install 失败。请手动运行：cd $PLUGIN_DIR && npm install --registry https://registry.npmmirror.com"
-  fi
-  success "依赖安装完成"
-fi
-
-# ── 第 8 步：生成模板配置 JSON ──
-info "第 8 步：生成配置..."
-
-gen_config() {
-  local KEY="$1"
-  local TPL="$2"
-
-  local EMBEDDING='{
-    "apiKey": "'"$KEY"'",
-    "model": "jina-embeddings-v5-text-small",
-    "baseURL": "https://api.jina.ai/v1",
-    "dimensions": 1024,
-    "taskQuery": "retrieval.query",
-    "taskPassage": "retrieval.passage",
-    "normalized": true
-  }'
-
-  case "$TPL" in
-    lite-safe)
-      echo '{
-  "embedding": '"$EMBEDDING"',
-  "autoCapture": true,
-  "autoRecall": false,
-  "retrieval": {
-    "mode": "hybrid",
-    "candidatePoolSize": 20,
-    "minScore": 0.45,
-    "hardMinScore": 0.55,
-    "rerank": "none",
-    "filterNoise": true
-  },
-  "sessionStrategy": "systemSessionMemory",
-  "mdMirror": { "enabled": true, "dir": "memory-md" }
-}'
-      ;;
-    balanced-default)
-      echo '{
-  "embedding": '"$EMBEDDING"',
-  "autoCapture": true,
-  "autoRecall": true,
-  "autoRecallMinLength": 8,
-  "autoRecallTopK": 3,
-  "autoRecallExcludeReflection": true,
-  "autoRecallMaxAgeDays": 30,
-  "autoRecallMaxEntriesPerKey": 10,
-  "retrieval": {
-    "mode": "hybrid",
-    "candidatePoolSize": 20,
-    "minScore": 0.45,
-    "hardMinScore": 0.55,
-    "rerank": "none",
-    "filterNoise": true
-  },
-  "sessionStrategy": "systemSessionMemory"
-}'
-      ;;
-    pro-rerank)
-      echo '{
-  "embedding": '"$EMBEDDING"',
-  "autoCapture": true,
-  "autoRecall": true,
-  "autoRecallMinLength": 8,
-  "autoRecallTopK": 3,
-  "autoRecallExcludeReflection": true,
-  "autoRecallMaxAgeDays": 30,
-  "autoRecallMaxEntriesPerKey": 10,
-  "retrieval": {
-    "mode": "hybrid",
-    "candidatePoolSize": 20,
-    "minScore": 0.45,
-    "hardMinScore": 0.35,
-    "rerank": "cross-encoder",
-    "rerankApiKey": "'"$KEY"'",
-    "rerankModel": "jina-reranker-v3",
-    "rerankEndpoint": "https://api.jina.ai/v1/rerank",
-    "rerankProvider": "jina",
-    "recencyHalfLifeDays": 14,
-    "recencyWeight": 0.1,
-    "filterNoise": true
-  },
-  "sessionStrategy": "systemSessionMemory"
-}'
-      ;;
+  # 标记推荐
+  case "$RECOMMENDED_LEVEL" in
+    lite-safe)        REC_NUM=1 ;;
+    balanced-default) REC_NUM=2 ;;
+    pro-rerank)       REC_NUM=3 ;;
+    *)                REC_NUM=2 ;;
   esac
-}
 
-CONFIG_JSON=$(gen_config "$JINA_KEY" "$TEMPLATE")
-success "配置已生成（模板：${TEMPLATE}）"
+  while true; do
+    read -p "  输入数字 (1/2/3)，直接回车用推荐 ($REC_NUM): " LEVEL_CHOICE
+    LEVEL_CHOICE=${LEVEL_CHOICE:-$REC_NUM}
+    case "$LEVEL_CHOICE" in
+      1) TEMPLATE="lite-safe"; break ;;
+      2) TEMPLATE="balanced-default"; break ;;
+      3)
+        if [[ "${PROBE_RERANK_OK:-false}" != "true" ]]; then
+          warn "你的 API 不支持 rerank，选 pro-rerank 后精排功能不会生效。"
+          read -p "  仍然选择？(y/n) [n]: " FORCE_PRO
+          if [[ "${FORCE_PRO:-n}" =~ ^[yY]$ ]]; then
+            TEMPLATE="pro-rerank"; break
+          fi
+        else
+          TEMPLATE="pro-rerank"; break
+        fi
+        ;;
+      *) warn "无效选择，请输入 1、2 或 3。" ;;
+    esac
+  done
+  success "配置等级：$TEMPLATE"
 
-# ── 第 9 步：写入 openclaw.json（核心安全步骤） ──
-echo ""
-info "第 9 步：写入 openclaw.json..."
+  # ============================================================
+  #  第 7 步：生成配置 JSON（v3.0 动态生成）
+  # ============================================================
+  echo ""
+  info "第 7 步：生成配置 / Generating config from probe result..."
 
-# 构造要合并的 JSON 片段
-MERGE_JSON=$(cat <<MERGEOF
+  gen_config_from_probe() {
+    local PROBE_FILE="$1"
+    local LEVEL="$2"
+
+    node -e "
+      const fs = require('fs');
+      const probe = JSON.parse(fs.readFileSync('$PROBE_FILE', 'utf8'));
+      const level = '$LEVEL';
+
+      const emb = probe.embedding || {};
+
+      const config = {
+        embedding: {
+          apiKey: emb.apiKey || 'YOUR_API_KEY',
+          model: emb.model || 'unknown',
+          baseURL: emb.baseURL || probe.baseURL || '',
+          dimensions: emb.dimensions || 1024,
+        },
+        autoCapture: true,
+        autoRecall: level !== 'lite-safe',
+        retrieval: {
+          mode: 'hybrid',
+          candidatePoolSize: 20,
+          minScore: 0.45,
+          hardMinScore: level === 'pro-rerank' ? 0.35 : 0.55,
+          rerank: 'none',
+          filterNoise: true,
+        },
+        sessionStrategy: 'systemSessionMemory',
+      };
+
+      // Jina 特有字段
+      if (emb.taskQuery) config.embedding.taskQuery = emb.taskQuery;
+      if (emb.taskPassage) config.embedding.taskPassage = emb.taskPassage;
+      if (emb.normalized) config.embedding.normalized = true;
+
+      // 等级特定
+      if (level !== 'lite-safe') {
+        config.autoRecallMinLength = 8;
+        config.autoRecallTopK = 3;
+        config.autoRecallExcludeReflection = true;
+        config.autoRecallMaxAgeDays = 30;
+        config.autoRecallMaxEntriesPerKey = 10;
+      }
+
+      if (level === 'lite-safe') {
+        config.mdMirror = { enabled: true, dir: 'memory-md' };
+      }
+
+      // rerank
+      const rr = probe.rerank || {};
+      if (level === 'pro-rerank' && rr.available) {
+        config.retrieval.rerank = 'cross-encoder';
+        config.retrieval.rerankApiKey = rr.apiKey || emb.apiKey || '';
+        config.retrieval.rerankModel = rr.model || '';
+        config.retrieval.rerankEndpoint = rr.endpoint || '';
+        config.retrieval.rerankProvider = rr.provider || 'jina';
+        config.retrieval.recencyHalfLifeDays = 14;
+        config.retrieval.recencyWeight = 0.1;
+      }
+
+      console.log(JSON.stringify(config, null, 2));
+    "
+  }
+
+  if $DRY_RUN; then
+    dry "从探测结果生成 $TEMPLATE 配置"
+    CONFIG_JSON='{}'
+  else
+    if [[ -f "${PROBE_RESULT:-}" ]]; then
+      CONFIG_JSON=$(gen_config_from_probe "$PROBE_RESULT" "$TEMPLATE")
+    else
+      # 没有探测结果（跳过了探测），用预设生成
+      warn "无探测结果，使用预设默认值生成配置。"
+      # 写一个临时探测结果
+      PROBE_RESULT="$(mktemp "${TMPDIR:-/tmp}/memory-probe-XXXXXX")"
+  _TMPFILES+=("$PROBE_RESULT")
+      node -e "
+        const result = {
+          baseURL: '$API_BASE_URL',
+          embedding: {
+            available: true,
+            model: '${EMBEDDING_MODEL:-unknown}',
+            dimensions: 1024,
+            apiKey: '$API_KEY',
+            baseURL: '$API_BASE_URL',
+            taskQuery: null,
+            taskPassage: null,
+            normalized: false,
+          },
+          rerank: { available: false, reason: 'no probe data' },
+        };
+        require('fs').writeFileSync('$PROBE_RESULT', JSON.stringify(result, null, 2));
+      "
+      CONFIG_JSON=$(gen_config_from_probe "$PROBE_RESULT" "$TEMPLATE")
+    fi
+  fi
+
+  success "配置已生成（等级：${TEMPLATE}）"
+
+  # ── 第 8 步：克隆插件 ──
+  echo ""
+  info "第 8 步：下载插件 / Downloading plugin..."
+
+  if [[ -d "$PLUGIN_DIR" ]]; then
+    warn "目录已存在，跳过 clone: $PLUGIN_DIR"
+  elif $DRY_RUN; then
+    dry "git clone $GITHUB_URL $PLUGIN_DIR"
+  else
+    mkdir -p "$(dirname "$PLUGIN_DIR")"
+    info "正在下载，请稍候 / Downloading, please wait..."
+    if ! git clone --quiet "$GITHUB_URL" "$PLUGIN_DIR" 2>&1; then
+      warn "GitHub clone 失败，尝试国内镜像..."
+      git clone --quiet "https://ghproxy.com/$GITHUB_URL" "$PLUGIN_DIR" \
+        || fail "镜像也失败了。请手动下载 zip 解压到 $PLUGIN_DIR 后重新运行脚本。"
+    fi
+    success "插件下载完成"
+  fi
+
+  # ── 第 9 步：安装依赖 ──
+  echo ""
+  info "第 9 步：安装依赖 / Installing dependencies..."
+
+  if $DRY_RUN; then
+    dry "cd $PLUGIN_DIR && npm install"
+  elif [[ -d "$PLUGIN_DIR/node_modules" ]]; then
+    warn "node_modules 已存在，跳过。"
+  else
+    info "正在安装依赖，请稍候..."
+    if ! (cd "$PLUGIN_DIR" && npm install --loglevel=warn 2>&1); then
+      warn "默认源失败，切换国内镜像..."
+      (cd "$PLUGIN_DIR" && npm install --loglevel=warn --registry https://registry.npmmirror.com 2>&1) \
+        || fail "npm install 失败。请手动运行：cd $PLUGIN_DIR && npm install --registry https://registry.npmmirror.com"
+    fi
+    success "依赖安装完成"
+  fi
+
+  # ── 第 10 步：写入 openclaw.json ──
+  echo ""
+  info "第 10 步：写入 openclaw.json..."
+
+  MERGE_JSON=$(cat <<MERGEOF
 {
   "plugins": {
     "load": {
@@ -473,124 +1061,117 @@ MERGE_JSON=$(cat <<MERGEOF
   }
 }
 MERGEOF
-)
+  )
 
-if $DRY_RUN; then
-  dry "将以下配置合并到 $OPENCLAW_JSON:"
-  echo "$MERGE_JSON" | head -20
-  echo "  ..."
-elif ! $HAS_JQ; then
-  # ── 降级模式：没有 jq，打印让用户手动贴 ──
-  echo ""
-  echo "======================================================"
-  echo "  没有 jq，无法自动合并配置。"
-  echo "  请手动把以下内容加入 ${OPENCLAW_JSON}："
-  echo "======================================================"
-  echo ""
-  echo "$MERGE_JSON"
-  echo ""
-  echo "------------------------------------------------------"
-  echo "  如果已有 plugins 字段，请合并内容，不要覆盖。"
-  echo "  提示：安装 jq 后重新运行脚本可实现全自动。"
-  echo "    Mac:   brew install jq"
-  echo "    Linux: sudo apt install jq"
-  echo "------------------------------------------------------"
-  echo ""
-  read -p "编辑完成后，按回车继续验证... "
-else
-  # ── 全自动模式：用 jq 安全合并 ──
-
-  # 8a. 检查 openclaw.json 是否存在
-  if [[ ! -f "$OPENCLAW_JSON" ]]; then
-    warn "openclaw.json 不存在，将创建新文件。"
-    echo '{}' > "$OPENCLAW_JSON"
-  fi
-
-  # 8b. 验证 JSON 格式
-  if ! jq empty "$OPENCLAW_JSON" 2>/dev/null; then
-    fail "openclaw.json 格式错误（不是合法 JSON），请先手动修复。"
-  fi
-
-  # 8c. 检查是否已有其他 memory 插件
-  EXISTING_MEMORY=$(jq -r '.plugins.slots.memory // empty' "$OPENCLAW_JSON" 2>/dev/null || echo "")
-  if [[ -n "$EXISTING_MEMORY" && "$EXISTING_MEMORY" != "memory-lancedb-pro" ]]; then
+  if $DRY_RUN; then
+    dry "将以下配置合并到 $OPENCLAW_JSON:"
+    echo "$MERGE_JSON" | head -20
+    echo "  ..."
+  elif ! $HAS_JQ; then
     echo ""
-    warn "检测到已有 memory 插件：$EXISTING_MEMORY"
+    echo "======================================================"
+    echo "  没有 jq，无法自动合并配置。"
+    echo "  请手动把以下内容加入 ${OPENCLAW_JSON}："
+    echo "======================================================"
     echo ""
-    echo "  如果继续，memory slot 会被替换为 memory-lancedb-pro。"
-    echo "  原来的插件配置会保留，只是不再作为默认 memory 插件。"
+    echo "$MERGE_JSON"
     echo ""
-    read -p "  要替换吗？(y/n) [n]: " REPLACE
-    if [[ "${REPLACE:-n}" != "y" && "${REPLACE:-n}" != "Y" ]]; then
+    echo "------------------------------------------------------"
+    echo "  如果已有 plugins 字段，请合并内容，不要覆盖。"
+    echo "  提示：安装 jq 后重新运行脚本可实现全自动。"
+    echo "    Mac:   brew install jq"
+    echo "    Linux: sudo apt install jq"
+    echo "------------------------------------------------------"
+    echo ""
+    read -p "编辑完成后，按回车继续验证... "
+  else
+    if [[ ! -f "$OPENCLAW_JSON" ]]; then
+      warn "openclaw.json 不存在，将创建新文件。"
+      echo '{}' > "$OPENCLAW_JSON"
+    fi
+
+    if ! jq empty "$OPENCLAW_JSON" 2>/dev/null; then
+      fail "openclaw.json 格式错误（不是合法 JSON），请先手动修复。"
+    fi
+
+    EXISTING_MEMORY=$(jq -r '.plugins.slots.memory // empty' "$OPENCLAW_JSON" 2>/dev/null || echo "")
+    if [[ -n "$EXISTING_MEMORY" && "$EXISTING_MEMORY" != "memory-lancedb-pro" ]]; then
       echo ""
-      echo "  已取消。你可以手动编辑 $OPENCLAW_JSON 来配置。"
-      echo "  配置内容如下，可手动参考："
+      warn "检测到已有 memory 插件：$EXISTING_MEMORY"
       echo ""
-      echo "$MERGE_JSON"
+      echo "  如果继续，memory slot 会被替换为 memory-lancedb-pro。"
+      echo "  原来的插件配置会保留，只是不再作为默认 memory 插件。"
       echo ""
-      exit 0
+      read -p "  要替换吗？(y/n) [n]: " REPLACE
+      if [[ "${REPLACE:-n}" != "y" && "${REPLACE:-n}" != "Y" ]]; then
+        echo ""
+        echo "  已取消。配置内容如下，可手动参考："
+        echo ""
+        echo "$MERGE_JSON"
+        echo ""
+        exit 0
+      fi
+    fi
+
+    BACKUP_FILE="$OPENCLAW_JSON.backup.$(date +%Y%m%d_%H%M%S)"
+    cp "$OPENCLAW_JSON" "$BACKUP_FILE"
+    success "已备份当前配置 → $BACKUP_FILE"
+
+    MERGED=$(jq --argjson new "$MERGE_JSON" '
+      .plugins //= {} |
+      .plugins.load //= {} |
+      .plugins.load.paths //= [] |
+      .plugins.entries //= {} |
+      .plugins.slots //= {} |
+      .plugins.load.paths = (.plugins.load.paths + $new.plugins.load.paths | unique) |
+      .plugins.entries["memory-lancedb-pro"] = $new.plugins.entries["memory-lancedb-pro"] |
+      .plugins.slots.memory = $new.plugins.slots.memory
+    ' "$OPENCLAW_JSON")
+
+    if echo "$MERGED" | jq empty 2>/dev/null; then
+      echo "$MERGED" > "$OPENCLAW_JSON"
+      success "openclaw.json 已更新（原文件已备份）"
+    else
+      fail "合并后 JSON 格式异常，已中止。原文件未改动。备份在：$BACKUP_FILE"
     fi
   fi
 
-  # 8d. 备份当前配置
-  BACKUP_FILE="$OPENCLAW_JSON.backup.$(date +%Y%m%d_%H%M%S)"
-  cp "$OPENCLAW_JSON" "$BACKUP_FILE"
-  success "已备份当前配置 → $BACKUP_FILE"
+fi  # end of FRESH_INSTALL block
 
-  # 8e. 用 jq 深度合并
-  #   - plugins.load.paths：追加新路径（不重复）
-  #   - plugins.entries：追加新插件配置
-  #   - plugins.slots.memory：设为 memory-lancedb-pro
-  #   - 其他所有字段：保持不变
-  MERGED=$(jq --argjson new "$MERGE_JSON" '
-    # 确保 plugins 结构存在
-    .plugins //= {} |
-    .plugins.load //= {} |
-    .plugins.load.paths //= [] |
-    .plugins.entries //= {} |
-    .plugins.slots //= {} |
+# ============================================================
+#  通用步骤：重启、验证、config validate、配置全景
+# ============================================================
 
-    # 追加 load path（去重）
-    .plugins.load.paths = (.plugins.load.paths + $new.plugins.load.paths | unique) |
+# ── 重启 Gateway ──
+NEED_GATEWAY_RESTART=true
+if ! $FRESH_INSTALL && ! $UPGRADE_DONE; then
+  NEED_GATEWAY_RESTART=false
+fi
 
-    # 写入 entries（只覆盖 memory-lancedb-pro，不动其他插件）
-    .plugins.entries["memory-lancedb-pro"] = $new.plugins.entries["memory-lancedb-pro"] |
+if $NEED_GATEWAY_RESTART; then
+  echo ""
+  info "重启 Gateway / Restarting Gateway..."
 
-    # 设置 memory slot
-    .plugins.slots.memory = $new.plugins.slots.memory
-  ' "$OPENCLAW_JSON")
-
-  # 8f. 写回文件前最后验证
-  if echo "$MERGED" | jq empty 2>/dev/null; then
-    echo "$MERGED" > "$OPENCLAW_JSON"
-    success "openclaw.json 已更新（原文件已备份）"
+  if $DRY_RUN; then
+    dry "openclaw gateway restart"
   else
-    fail "合并后 JSON 格式异常，已中止。原文件未改动。备份在：$BACKUP_FILE"
+    if openclaw gateway restart 2>&1; then
+      success "Gateway 重启完成"
+    else
+      warn "重启可能失败，请手动运行：openclaw gateway restart"
+    fi
   fi
 fi
 
-# ── 第 10 步：重启 Gateway ──
+# ── 验证 ──
 echo ""
-info "第 10 步：重启 Gateway..."
-
-if $DRY_RUN; then
-  dry "openclaw gateway restart"
-else
-  if openclaw gateway restart 2>&1; then
-    success "Gateway 重启完成"
-  else
-    warn "重启可能失败，请手动运行：openclaw gateway restart"
-  fi
-fi
-
-# ── 第 11 步：验证 ──
-echo ""
-info "第 11 步：验证..."
+info "确认插件运行状态（例行检查）..."
 
 if $DRY_RUN; then
   dry "openclaw plugins info memory-lancedb-pro"
   dry "openclaw config get plugins.slots.memory"
   dry "openclaw memory-pro stats"
+  dry "node $VALIDATE_SCRIPT"
   echo ""
   success "DRY-RUN 完成。确认无误后去掉 --dry-run 参数正式运行。"
   exit 0
@@ -600,7 +1181,7 @@ PASS=0
 TOTAL=3
 
 echo ""
-echo "--- 检查 1/3：插件是否加载 ---"
+echo "--- 检查 1/3：插件是否加载 / Plugin loaded? ---"
 if openclaw plugins info memory-lancedb-pro 2>&1; then
   success "插件已加载"
   PASS=$((PASS + 1))
@@ -619,32 +1200,32 @@ else
 fi
 
 echo ""
-echo "--- 检查 3/3：记忆库状态 ---"
+echo "--- 检查 3/3：记忆库状态 / Memory store status ---"
 if openclaw memory-pro stats 2>&1; then
   success "记忆库正常"
   PASS=$((PASS + 1))
 else
-  warn "记忆库状态检查失败"
+  if $FRESH_INSTALL; then
+    info "记忆库尚未初始化（这是正常的，第一次对话后会自动创建）"
+    PASS=$((PASS + 1))
+  else
+    warn "记忆库状态检查失败"
+  fi
 fi
 
 # ── 结果汇报 ──
 echo ""
 echo "======================================================"
 if [[ "$PASS" -eq "$TOTAL" ]]; then
-  echo -e "${GREEN}${BOLD}  全部通过（${PASS}/${TOTAL}）！安装完成！${NC}"
-  echo ""
-  echo "  现在试试对你的 Agent 说："
-  echo ""
-  echo "    「记住：我喜欢冷萃咖啡，不喜欢太甜。」"
-  echo ""
-  if [[ "$TEMPLATE" == "lite-safe" ]]; then
-    echo "  然后打开 $WORKSPACE/memory-md/ 目录，"
-    echo "  看看有没有 .md 文件生成 — 有就说明记忆已存入。"
-    echo ""
-    echo "  （lite-safe 模式先存不召回，跑稳了再升级到 balanced-default）"
+  if $FRESH_INSTALL; then
+    echo -e "${GREEN}${BOLD}  全部通过（${PASS}/${TOTAL}）！安装完成！${NC}"
+  elif $UPGRADE_DONE; then
+    echo -e "${GREEN}${BOLD}  全部通过（${PASS}/${TOTAL}）！升级完成！${NC}"
   else
-    echo "  然后在新对话里问：「我平时喝什么咖啡？」"
-    echo "  Agent 能回答就说明记忆召回正常。"
+    echo -e "${GREEN}${BOLD}  全部通过（${PASS}/${TOTAL}）！插件运行正常。${NC}"
+    if ! $FRESH_INSTALL; then
+      echo -e "  当前版本：v$LOCAL_VER"
+    fi
   fi
 else
   echo -e "${YELLOW}${BOLD}  $PASS/$TOTAL 通过${NC}"
@@ -659,212 +1240,259 @@ fi
 echo "======================================================"
 echo ""
 
-# ── 第 12 步：功能知情 + 可选升级 ──
-# 只在全部通过时展示，避免安装失败时干扰排障
+# ============================================================
+#  Config Validate（v3.0 新增）
+# ============================================================
+if [[ "$PASS" -eq "$TOTAL" ]] && ! $DRY_RUN && [[ -f "$VALIDATE_SCRIPT" ]]; then
+  echo ""
+  info "配置校验 / Config Validation..."
+  node "$VALIDATE_SCRIPT" 2>/dev/null || warn "配置校验发现问题，请检查上方输出。"
+fi
+
+# ============================================================
+#  配置全景 + 可选功能
+# ============================================================
 if [[ "$PASS" -eq "$TOTAL" ]] && ! $DRY_RUN; then
   echo ""
-  info "第 12 步：功能知情（你的记忆系统长什么样）"
-  echo ""
-  echo -e "  ${BOLD}当前模板：${TEMPLATE}${NC}"
+  info "配置全景 / Full Configuration Overview"
   echo ""
 
-  # 根据模板展示当前状态（纯文本列表，避免 box-drawing 在不同终端错位）
-  show_feature() {
-    local status="$1" name="$2" desc="$3"
-    if [[ "$status" == "on" ]]; then
-      echo -e "    ${GREEN}[ON]${NC}  $name — $desc"
+  CFG_PATH='.plugins.entries["memory-lancedb-pro"].config'
+
+  if $HAS_JQ && [[ -f "$OPENCLAW_JSON" ]]; then
+    # 读取所有配置值
+    AUTO_CAPTURE=$(jq -r "$CFG_PATH.autoCapture // false" "$OPENCLAW_JSON" 2>/dev/null)
+    AUTO_RECALL=$(jq -r "$CFG_PATH.autoRecall // false" "$OPENCLAW_JSON" 2>/dev/null)
+    AUTO_RECALL_MIN_LEN=$(jq -r "$CFG_PATH.autoRecallMinLength // \"N/A\"" "$OPENCLAW_JSON" 2>/dev/null)
+    AUTO_RECALL_TOP_K=$(jq -r "$CFG_PATH.autoRecallTopK // \"N/A\"" "$OPENCLAW_JSON" 2>/dev/null)
+    AUTO_RECALL_MAX_AGE=$(jq -r "$CFG_PATH.autoRecallMaxAgeDays // \"N/A\"" "$OPENCLAW_JSON" 2>/dev/null)
+    SESSION_STRATEGY=$(jq -r "$CFG_PATH.sessionStrategy // \"systemSessionMemory\"" "$OPENCLAW_JSON" 2>/dev/null)
+    RERANK_MODE=$(jq -r "$CFG_PATH.retrieval.rerank // \"none\"" "$OPENCLAW_JSON" 2>/dev/null)
+    MD_MIRROR=$(jq -r "$CFG_PATH.mdMirror.enabled // false" "$OPENCLAW_JSON" 2>/dev/null)
+    MIN_SCORE=$(jq -r "$CFG_PATH.retrieval.minScore // \"N/A\"" "$OPENCLAW_JSON" 2>/dev/null)
+    HARD_MIN_SCORE=$(jq -r "$CFG_PATH.retrieval.hardMinScore // \"N/A\"" "$OPENCLAW_JSON" 2>/dev/null)
+    FILTER_NOISE=$(jq -r "$CFG_PATH.retrieval.filterNoise // false" "$OPENCLAW_JSON" 2>/dev/null)
+    CANDIDATE_POOL=$(jq -r "$CFG_PATH.retrieval.candidatePoolSize // \"N/A\"" "$OPENCLAW_JSON" 2>/dev/null)
+    RETRIEVAL_MODE=$(jq -r "$CFG_PATH.retrieval.mode // \"N/A\"" "$OPENCLAW_JSON" 2>/dev/null)
+
+    # embedding 信息
+    EMB_MODEL=$(jq -r "$CFG_PATH.embedding.model // \"N/A\"" "$OPENCLAW_JSON" 2>/dev/null)
+    EMB_BASE_URL=$(jq -r "$CFG_PATH.embedding.baseURL // \"N/A\"" "$OPENCLAW_JSON" 2>/dev/null)
+    EMB_DIM=$(jq -r "$CFG_PATH.embedding.dimensions // \"N/A\"" "$OPENCLAW_JSON" 2>/dev/null)
+
+    # API Key 状态
+    JINA_KEY_VAL=$(jq -r "$CFG_PATH.embedding.apiKey // \"\"" "$OPENCLAW_JSON" 2>/dev/null)
+    if [[ -n "$JINA_KEY_VAL" && "$JINA_KEY_VAL" != "YOUR_JINA_API_KEY" && "$JINA_KEY_VAL" != "YOUR_API_KEY" ]]; then
+      KEY_STATUS="${GREEN}已配置${NC}"
     else
-      echo -e "    ${YELLOW}[OFF]${NC} $name — $desc"
-    fi
-  }
-
-  case "$TEMPLATE" in
-    lite-safe)
-      show_feature on  "autoCapture" "自动存储 / Auto store conversation info"
-      show_feature off "autoRecall"  "自动召回关闭 / Won't search old memories in new chats"
-      show_feature off "Reflection"  "智能提炼关闭 / No AI summarization per turn"
-      show_feature off "rerank"      "精排关闭 / No second-pass ranking on search"
-      show_feature on  "mdMirror"    "可读备份 / Memories also saved as .md files"
-      echo ""
-      echo "  lite-safe = 先存不召回，跑稳了再升级"
-      echo "              Store first, recall later — upgrade when stable"
-      ;;
-    balanced-default)
-      show_feature on  "autoCapture" "自动存储 / Auto store conversation info"
-      show_feature on  "autoRecall"  "自动召回 / Auto search relevant old memories"
-      show_feature off "Reflection"  "智能提炼关闭 / No AI summarization per turn"
-      show_feature off "rerank"      "精排关闭 / No second-pass ranking on search"
-      show_feature off "mdMirror"    "可读备份关闭 / Memories only in vector DB"
-      echo ""
-      echo "  balanced = 存+召回，够用且省 token"
-      echo "             Store + recall, good enough and token-efficient"
-      ;;
-    pro-rerank)
-      show_feature on  "autoCapture" "自动存储 / Auto store conversation info"
-      show_feature on  "autoRecall"  "自动召回 / Auto search relevant old memories"
-      show_feature off "Reflection"  "智能提炼关闭 / No AI summarization per turn"
-      show_feature on  "rerank"      "Jina Reranker 精排 / Second-pass reranking enabled"
-      show_feature off "mdMirror"    "可读备份关闭 / Memories only in vector DB"
-      echo ""
-      echo "  pro = 存+召回+精排，检索质量最高"
-      echo "        Store + recall + rerank, best search quality"
-      ;;
-  esac
-
-  echo ""
-  echo -e "  ${BOLD}关于「智能提炼 memoryReflection」/ About Smart Extraction:${NC}"
-  echo "    开启后，Agent 每轮对话额外调用一次 AI 提炼要点，记忆更精练、召回更准。"
-  echo "    When enabled, the Agent makes one extra AI call per turn to distill key points,"
-  echo "    resulting in more concise memories and better recall accuracy."
-  echo -e "    ${YELLOW}代价 / Cost: ~500-1000 extra tokens per turn.${NC}"
-  echo "    当前 / Current: systemSessionMemory = 原样存储，不做提炼 / raw storage, no distillation."
-  echo ""
-
-  # 根据模板提供不同的升级选项
-  UPGRADE_CHOICES=""
-  case "$TEMPLATE" in
-    lite-safe)
-      echo -e "  ${BOLD}可选升级 / Optional upgrades（多个用空格分隔，回车跳过 / space-separated, Enter to skip）：${NC}"
-      echo ""
-      echo "    1) 开启自动召回 autoRecall  — Enable auto recall in new chats"
-      echo "    2) 开启智能提炼 Reflection  — Enable AI smart extraction (costs extra tokens)"
-      echo ""
-      read -p "  输入编号 / Enter number (1 2), 回车跳过 / Enter to skip: " UPGRADE_CHOICES
-      ;;
-    balanced-default)
-      echo -e "  ${BOLD}可选升级 / Optional upgrades（回车跳过 / Enter to skip）：${NC}"
-      echo ""
-      echo "    2) 开启智能提炼 Reflection  — Enable AI smart extraction (costs extra tokens)"
-      echo ""
-      read -p "  输入编号 / Enter number (2), 回车跳过 / Enter to skip: " UPGRADE_CHOICES
-      ;;
-    pro-rerank)
-      echo -e "  ${BOLD}可选升级 / Optional upgrades（回车跳过 / Enter to skip）：${NC}"
-      echo ""
-      echo "    2) 开启智能提炼 Reflection  — Enable AI smart extraction (costs extra tokens)"
-      echo ""
-      read -p "  输入编号 / Enter number (2), 回车跳过 / Enter to skip: " UPGRADE_CHOICES
-      ;;
-  esac
-
-  # 预处理用户输入：中英文逗号→空格，粘连数字拆开（"12"→"1 2"）
-  UPGRADE_CHOICES=$(echo "$UPGRADE_CHOICES" | tr '，,' ' ' | sed 's/\([0-9]\)/\1 /g' | tr -s ' ' | sed 's/^ *//;s/ *$//')
-
-  if [[ -n "$UPGRADE_CHOICES" ]]; then
-    NEED_RESTART=false
-    MANUAL_EDITS=false
-
-    # 构建当前模板的合法选项集 + 已开启功能集
-    VALID_OPTS="2"  # 所有模板都可选 2
-    ALREADY_ON=""
-    if [[ "$TEMPLATE" == "lite-safe" ]]; then
-      VALID_OPTS="1 2"
-    else
-      ALREADY_ON="1"  # balanced/pro 的 autoRecall 已经开了
+      KEY_STATUS="${YELLOW}未配置（占位符）${NC}"
     fi
 
-    # jq 安全写入：写 .tmp → 验证 → 替换原文件，失败时清理 .tmp
-    jq_safe_write() {
-      local filter="$1"
-      jq "$filter" "$OPENCLAW_JSON" > "${OPENCLAW_JSON}.tmp" || { rm -f "${OPENCLAW_JSON}.tmp"; return 1; }
-      if jq empty "${OPENCLAW_JSON}.tmp" 2>/dev/null; then
-        mv "${OPENCLAW_JSON}.tmp" "$OPENCLAW_JSON" || { rm -f "${OPENCLAW_JSON}.tmp"; warn "写入失败，检查文件权限 / Write failed, check permissions: $OPENCLAW_JSON"; return 1; }
-      else
-        rm -f "${OPENCLAW_JSON}.tmp"
-        warn "jq 输出格式异常，已中止 / jq output invalid, aborted"
-        return 1
-      fi
-    }
+    # ── 展示全景 ──
+    echo -e "  ${BOLD}版本 / Version:${NC}      v$LOCAL_VER"
+    echo -e "  ${BOLD}API Key:${NC}             $KEY_STATUS"
+    echo -e "  ${BOLD}Embedding 模型:${NC}      $EMB_MODEL ($EMB_BASE_URL, ${EMB_DIM}维)"
+    echo ""
 
-    for choice in $UPGRADE_CHOICES; do
-      # 过滤非数字输入（yes/y/abc 等）
-      if ! [[ "$choice" =~ ^[0-9]+$ ]]; then
-        warn "请输入数字编号（如 1 2）/ Please enter numbers (e.g. 1 2), got: $choice"
-        continue
-      fi
+    echo -e "  ${BOLD}── 存储 / Storage ──${NC}"
+    if [[ "$AUTO_CAPTURE" == "true" ]]; then
+      show_feature on "autoCapture" "自动存储 / Auto store"
+    else
+      show_feature off "autoCapture" "自动存储 / Auto store"
+    fi
+    if [[ "$MD_MIRROR" == "true" ]]; then
+      show_feature on "mdMirror" "可读 .md 备份 / Readable .md backup"
+    else
+      show_feature off "mdMirror" "可读 .md 备份 / Readable .md backup"
+    fi
 
-      # 已经开了的功能，友好提示而非报错
-      if echo " $ALREADY_ON " | grep -q " $choice "; then
-        case "$choice" in
-          1) info "autoRecall 在 $TEMPLATE 模板里已经是开启状态 / autoRecall is already ON in $TEMPLATE." ;;
-        esac
-        continue
-      fi
+    echo ""
+    echo -e "  ${BOLD}── 召回 / Recall ──${NC}"
+    if [[ "$AUTO_RECALL" == "true" ]]; then
+      show_feature on "autoRecall" "自动召回 / Auto recall" "minLength=$AUTO_RECALL_MIN_LEN, topK=$AUTO_RECALL_TOP_K, maxAge=${AUTO_RECALL_MAX_AGE}d"
+    else
+      show_feature off "autoRecall" "自动召回 / Auto recall"
+    fi
+    if [[ "$SESSION_STRATEGY" == "memoryReflection" ]]; then
+      show_feature on "Reflection" "智能提炼 / Smart extraction"
+    else
+      show_feature off "Reflection" "智能提炼（当前：普通存储模式）"
+    fi
 
-      # 当前模板不支持的选项
-      if ! echo " $VALID_OPTS " | grep -q " $choice "; then
-        warn "选项 $choice 不在可选范围内 / Option $choice is not available, skipped."
-        continue
-      fi
+    echo ""
+    echo -e "  ${BOLD}── 检索 / Retrieval ──${NC}"
+    if [[ "$RERANK_MODE" != "none" ]]; then
+      show_feature on "rerank" "精排 / Reranking" "mode=$RERANK_MODE"
+    else
+      show_feature off "rerank" "精排 / Reranking"
+    fi
+    if [[ "$FILTER_NOISE" == "true" ]]; then
+      show_feature on "filterNoise" "噪声过滤 / Noise filter"
+    else
+      show_feature off "filterNoise" "噪声过滤 / Noise filter"
+    fi
+    echo -e "        retrievalMode       = $RETRIEVAL_MODE"
+    echo -e "        candidatePoolSize   = $CANDIDATE_POOL"
+    echo -e "        minScore            = $MIN_SCORE"
+    echo -e "        hardMinScore        = $HARD_MIN_SCORE"
 
-      case "$choice" in
-        1)
-          if $HAS_JQ; then
-            if jq_safe_write '
-                .plugins.entries["memory-lancedb-pro"].config.autoRecall = true |
-                .plugins.entries["memory-lancedb-pro"].config.autoRecallMinLength = (.plugins.entries["memory-lancedb-pro"].config.autoRecallMinLength // 8) |
-                .plugins.entries["memory-lancedb-pro"].config.autoRecallTopK = (.plugins.entries["memory-lancedb-pro"].config.autoRecallTopK // 3) |
-                .plugins.entries["memory-lancedb-pro"].config.autoRecallMaxAgeDays = (.plugins.entries["memory-lancedb-pro"].config.autoRecallMaxAgeDays // 30)'; then
-              success "autoRecall enabled / 已开启自动召回"
-              NEED_RESTART=true
-            else
-              warn "autoRecall 写入失败 / Failed to enable autoRecall"
-            fi
-          else
-            warn "没有 jq，需要手动修改 / No jq, manual edit needed:"
-            echo "    nano $OPENCLAW_JSON"
-            echo '    "autoRecall": false  →  "autoRecall": true'
-            echo '    add: "autoRecallMinLength": 8, "autoRecallTopK": 3'
-            echo "    改完后运行 / After editing: openclaw gateway restart"
-            MANUAL_EDITS=true
-          fi
-          ;;
-        2)
-          if $HAS_JQ; then
-            if jq_safe_write '.plugins.entries["memory-lancedb-pro"].config.sessionStrategy = "memoryReflection"'; then
-              success "memoryReflection enabled / 已开启智能提炼"
-              echo "    每轮对话多一次 AI 调用 / Extra AI call per turn for distillation."
-              echo ""
-              echo "    改回来 / To revert:"
-              echo "      nano $OPENCLAW_JSON"
-              echo "      \"memoryReflection\" → \"systemSessionMemory\""
-              echo "      然后运行 / then run: openclaw gateway restart"
-              NEED_RESTART=true
-            else
-              warn "memoryReflection 写入失败 / Failed to enable memoryReflection"
-            fi
-          else
-            warn "没有 jq，需要手动修改 / No jq, manual edit needed:"
-            echo "    nano $OPENCLAW_JSON"
-            echo '    "sessionStrategy": "systemSessionMemory"  →  "memoryReflection"'
-            echo "    改完后运行 / After editing: openclaw gateway restart"
-            MANUAL_EDITS=true
-          fi
-          ;;
-        *)
-          warn "无效选项 / Invalid option: $choice, skipped."
-          ;;
-      esac
-    done
+    # ── 动态可选功能 ──
+    echo ""
+    OPTIONS=()
+    OPTION_KEYS=()
+    OPTION_LABELS=()
+    n=0
 
-    if $NEED_RESTART; then
+    if [[ "$AUTO_CAPTURE" != "true" ]]; then
+      n=$((n+1)); OPTION_KEYS+=("autoCapture")
+      OPTION_LABELS+=("$n) autoCapture    — 开启自动存储 / Enable auto store")
+    fi
+    if [[ "$AUTO_RECALL" != "true" ]]; then
+      n=$((n+1)); OPTION_KEYS+=("autoRecall")
+      OPTION_LABELS+=("$n) autoRecall     — 开启自动召回 / Enable auto recall in new chats")
+    fi
+    if [[ "$SESSION_STRATEGY" != "memoryReflection" ]]; then
+      n=$((n+1)); OPTION_KEYS+=("reflection")
+      OPTION_LABELS+=("$n) Reflection     — 智能提炼 / Smart extraction (~500-1000 extra tokens/turn)")
+    fi
+    if [[ "$RERANK_MODE" == "none" ]]; then
+      n=$((n+1)); OPTION_KEYS+=("rerank")
+      OPTION_LABELS+=("$n) rerank         — 精排 / Enable reranking")
+    fi
+    if [[ "$MD_MIRROR" != "true" ]]; then
+      n=$((n+1)); OPTION_KEYS+=("mdMirror")
+      OPTION_LABELS+=("$n) mdMirror       — 可读 .md 备份 / Enable .md mirror")
+    fi
+
+    if [[ $n -eq 0 ]]; then
+      echo -e "  ${GREEN}所有功能已开启，无需调整 / All features enabled, no changes needed.${NC}"
+    else
+      echo -e "  ${BOLD}可选开启 / Available to enable（空格分隔，回车跳过）：${NC}"
       echo ""
-      info "配置已更新，重启 Gateway / Config updated, restarting Gateway..."
-      if openclaw gateway restart 2>&1; then
-        success "Gateway 重启完成 / Gateway restarted, new config active."
-      else
-        warn "重启可能失败 / Restart may have failed. Try: openclaw gateway restart"
-      fi
-    elif $MANUAL_EDITS; then
+      for label in "${OPTION_LABELS[@]}"; do
+        echo "    $label"
+      done
       echo ""
-      warn "以上功能需要手动修改配置文件才能生效 / Manual edits needed — see instructions above."
-      echo "    安装 jq 后重跑脚本可自动完成 / Install jq and re-run for auto setup:"
+      read -p "  输入编号（如 1 2 或 1,2），回车跳过: " UPGRADE_INPUT
+
+      # 只按空格/逗号/中文逗号分割，不拆连续数字（防止 12 变成 1 2）
+      UPGRADE_INPUT=$(echo "$UPGRADE_INPUT" | tr '，,' ' ' | tr -s ' ' | sed 's/^ *//;s/ *$//')
+
+      if [[ -n "$UPGRADE_INPUT" ]]; then
+        NEED_RESTART=false
+
+        for choice in $UPGRADE_INPUT; do
+          if ! [[ "$choice" =~ ^[0-9]+$ ]]; then
+            warn "请输入数字编号 / Please enter numbers, got: $choice"
+            continue
+          fi
+
+          if [[ "$choice" -lt 1 || "$choice" -gt $n ]]; then
+            warn "选项 $choice 超出范围 / Option $choice out of range (1-$n)"
+            continue
+          fi
+
+          local_key="${OPTION_KEYS[$((choice-1))]}"
+
+          case "$local_key" in
+            autoCapture)
+              if jq_safe_write "$CFG_PATH.autoCapture = true" "$OPENCLAW_JSON"; then
+                success "autoCapture enabled / 已开启自动存储"
+                NEED_RESTART=true
+              else
+                warn "autoCapture 写入失败 / Failed"
+              fi
+              ;;
+            autoRecall)
+              if jq_safe_write "
+                $CFG_PATH.autoRecall = true |
+                $CFG_PATH.autoRecallMinLength = ($CFG_PATH.autoRecallMinLength // 8) |
+                $CFG_PATH.autoRecallTopK = ($CFG_PATH.autoRecallTopK // 3) |
+                $CFG_PATH.autoRecallMaxAgeDays = ($CFG_PATH.autoRecallMaxAgeDays // 30)
+              " "$OPENCLAW_JSON"; then
+                success "autoRecall enabled / 已开启自动召回"
+                NEED_RESTART=true
+              else
+                warn "autoRecall 写入失败 / Failed"
+              fi
+              ;;
+            reflection)
+              if jq_safe_write "$CFG_PATH.sessionStrategy = \"memoryReflection\"" "$OPENCLAW_JSON"; then
+                success "memoryReflection enabled / 已开启智能提炼"
+                echo "    每轮对话多一次 AI 调用 / Extra AI call per turn for distillation."
+                NEED_RESTART=true
+              else
+                warn "memoryReflection 写入失败 / Failed"
+              fi
+              ;;
+            rerank)
+              RERANK_KEY_VAL=$(jq -r "$CFG_PATH.embedding.apiKey // \"\"" "$OPENCLAW_JSON" 2>/dev/null)
+              if [[ -z "$RERANK_KEY_VAL" || "$RERANK_KEY_VAL" == "YOUR_JINA_API_KEY" || "$RERANK_KEY_VAL" == "YOUR_API_KEY" ]]; then
+                warn "rerank 需要 API Key，请先配置 / Rerank requires API Key"
+              elif jq_safe_write "
+                $CFG_PATH.retrieval.rerank = \"cross-encoder\" |
+                $CFG_PATH.retrieval.rerankApiKey = \"$RERANK_KEY_VAL\" |
+                $CFG_PATH.retrieval.rerankModel = \"jina-reranker-v3\" |
+                $CFG_PATH.retrieval.rerankEndpoint = \"https://api.jina.ai/v1/rerank\" |
+                $CFG_PATH.retrieval.rerankProvider = \"jina\" |
+                $CFG_PATH.retrieval.hardMinScore = 0.35
+              " "$OPENCLAW_JSON"; then
+                success "rerank enabled / 已开启精排"
+                NEED_RESTART=true
+              else
+                warn "rerank 写入失败 / Failed"
+              fi
+              ;;
+            mdMirror)
+              if jq_safe_write "$CFG_PATH.mdMirror = {\"enabled\": true, \"dir\": \"memory-md\"}" "$OPENCLAW_JSON"; then
+                success "mdMirror enabled / 已开启 .md 备份"
+                NEED_RESTART=true
+              else
+                warn "mdMirror 写入失败 / Failed"
+              fi
+              ;;
+          esac
+        done
+
+        if $NEED_RESTART; then
+          echo ""
+          info "配置已更新，重启 Gateway / Config updated, restarting Gateway..."
+          if openclaw gateway restart 2>&1; then
+            success "Gateway 重启完成 / Gateway restarted."
+          else
+            warn "重启可能失败 / Restart may have failed. Try: openclaw gateway restart"
+          fi
+        else
+          echo ""
+          info "没有选中任何有效功能，配置未改动。"
+        fi
+      else
+        echo ""
+        success "保持当前配置 / Keeping current config."
+      fi
+    fi
+
+  else
+    if ! $HAS_JQ; then
+      warn "没有 jq，无法读取配置全景。安装 jq 后重跑可查看。"
       echo "    Mac: brew install jq  |  Linux: sudo apt install jq"
     fi
-  else
-    echo ""
-    success "保持当前配置 / Keeping current config, no changes made."
-    echo "    之后想升级 / To upgrade later:"
-    echo "    - 重跑 / Re-run: bash setup-memory.sh"
+
+    if $FRESH_INSTALL; then
+      echo -e "  ${BOLD}已选等级 / Level: ${TEMPLATE:-unknown}${NC}"
+      echo ""
+      echo "  现在试试对你的 Agent 说 / Try telling your Agent:"
+      echo ""
+      echo "    「记住：我喜欢冷萃咖啡，不喜欢太甜。」"
+      echo ""
+      echo "  然后在新对话里问 / Then in a new chat, ask:"
+      echo "    「我平时喝什么咖啡？」"
+    fi
   fi
+
+  # ── 提示下次升级 ──
+  echo ""
+  echo -e "  ${BOLD}之后升级 / Future upgrades:${NC}"
+  echo "    bash setup-memory.sh          # 检查稳定版更新"
+  echo "    bash setup-memory.sh --beta   # 包含 beta 版本"
 fi
