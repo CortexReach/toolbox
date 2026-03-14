@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-#  memory-lancedb-pro 一键安装 / 升级脚本 v3.2
+#  memory-lancedb-pro 一键安装 / 升级脚本 v3.3
 #
 #  用法：
 #    bash setup-memory.sh            # 安装（已安装则进入升级模式）
@@ -9,6 +9,10 @@
 #    bash setup-memory.sh --selfcheck-only  # 只跑能力自检，不改配置
 #    bash setup-memory.sh --uninstall # 还原配置并移除插件
 #    bash setup-memory.sh --ref v1.2.0  # 锁定到指定 tag/branch/commit
+#
+#  v3.3 变化：
+#    - 可选功能写入后、Gateway 重启前再跑一次 schema 过滤（修复 additional properties 崩溃）
+#    - Ollama/本地模型用户选 rerank 时提示需要在线 API Key
 #
 #  v3.2 变化：
 #    - 已有 git clone 的插件目录自动 fetch + checkout 到目标 ref
@@ -1644,9 +1648,24 @@ if [[ "$PASS" -eq "$TOTAL" ]] && ! $DRY_RUN; then
               ;;
             rerank)
               RERANK_KEY_VAL=$(jq -r "$CFG_PATH.embedding.apiKey // \"\"" "$OPENCLAW_JSON" 2>/dev/null)
-              if [[ -z "$RERANK_KEY_VAL" || "$RERANK_KEY_VAL" == "YOUR_JINA_API_KEY" || "$RERANK_KEY_VAL" == "YOUR_API_KEY" ]]; then
+              EMBED_BASE_URL=$(jq -r "$CFG_PATH.embedding.baseURL // \"\"" "$OPENCLAW_JSON" 2>/dev/null)
+              # Ollama / 本地模型没有在线 rerank 能力
+              if [[ "$RERANK_KEY_VAL" == "ollama" || "$EMBED_BASE_URL" == *"localhost:11434"* || "$EMBED_BASE_URL" == *"127.0.0.1:11434"* ]]; then
+                warn "rerank 需要在线 API（如 Jina），Ollama 本地模型不支持 / Rerank requires an online API (e.g. Jina). Ollama doesn't support rerank."
+                echo "    如需使用 rerank，请先注册 Jina（免费）获取 API Key / To use rerank, get a free Jina API Key: https://jina.ai/"
+                echo ""
+                read -p "    输入 Jina API Key（直接回车跳过 rerank）/ Paste Jina API Key (Enter to skip): " RERANK_JINA_KEY
+                if [[ -n "$RERANK_JINA_KEY" ]]; then
+                  RERANK_KEY_VAL="$RERANK_JINA_KEY"
+                else
+                  info "跳过 rerank / Skipping rerank"
+                  continue
+                fi
+              elif [[ -z "$RERANK_KEY_VAL" || "$RERANK_KEY_VAL" == "YOUR_JINA_API_KEY" || "$RERANK_KEY_VAL" == "YOUR_API_KEY" ]]; then
                 warn "rerank 需要 API Key，请先配置 / Rerank requires API Key"
-              elif jq_safe_write "
+                continue
+              fi
+              if jq_safe_write "
                 $CFG_PATH.retrieval.rerank = \"cross-encoder\" |
                 $CFG_PATH.retrieval.rerankApiKey = \"$RERANK_KEY_VAL\" |
                 $CFG_PATH.retrieval.rerankModel = \"jina-reranker-v3\" |
@@ -1672,6 +1691,26 @@ if [[ "$PASS" -eq "$TOTAL" ]] && ! $DRY_RUN; then
         done
 
         if $NEED_RESTART; then
+          # v3.3: 可选功能写入后再跑一次 schema 过滤，防止写入了插件不认的字段
+          if [[ -f "$PLUGIN_MANIFEST" ]]; then
+            CURRENT_CFG=$(jq -r "$CFG_PATH" "$OPENCLAW_JSON" 2>/dev/null)
+            if [[ -n "$CURRENT_CFG" && "$CURRENT_CFG" != "null" ]]; then
+              POST_FILTER=$(filter_config_by_schema "$CURRENT_CFG" "$PLUGIN_MANIFEST") || true
+              if [[ -n "$POST_FILTER" ]]; then
+                POST_REMOVED=$(echo "$POST_FILTER" | node -e "const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));const r=d.removed||[];if(r.length)console.log(r.join(', '));" 2>/dev/null || echo "")
+                if [[ -n "$POST_REMOVED" ]]; then
+                  warn "根据插件 schema 自动移除了不支持的字段 / Removed unsupported fields: $POST_REMOVED"
+                  POST_FILTERED_CFG=$(echo "$POST_FILTER" | node -e "const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));process.stdout.write(JSON.stringify(d.filtered,null,2));" 2>/dev/null)
+                  if [[ -n "$POST_FILTERED_CFG" ]]; then
+                    jq_safe_write "$CFG_PATH = $POST_FILTERED_CFG" "$OPENCLAW_JSON" \
+                      && success "配置已清理 / Config cleaned" \
+                      || warn "schema 过滤写回失败 / Schema filter write-back failed"
+                  fi
+                fi
+              fi
+            fi
+          fi
+
           echo ""
           info "配置已更新，重启 Gateway / Config updated, restarting Gateway..."
           if openclaw gateway restart 2>&1; then
