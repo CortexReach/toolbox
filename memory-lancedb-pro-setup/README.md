@@ -114,9 +114,9 @@ Or enter any OpenAI-compatible API endpoint manually.
 
 | OS | Terminal | Result |
 |----|----------|--------|
-| Linux (Docker arm64) | OpenClaw container | pass (v3.2) |
+| Linux (Docker arm64) | OpenClaw container | pass |
 | macOS | Terminal / iTerm2 | pass |
-| Windows WSL | Windows Terminal | pass |
+| Windows WSL | Windows Terminal | pass (known issue in v2.0 fixed in v3.2) |
 
 ## Changelog
 
