@@ -511,7 +511,7 @@ if ! $SELFCHECK_ONLY && [[ -d "$PLUGIN_DIR/.git" ]]; then
   info "检测到已有 git 仓库，自动更新 / Git repo detected, updating..."
   # 如果没指定 --ref，自动检测远程默认分支（main 或 master）
   if [[ -z "$PLUGIN_REF" ]]; then
-    PLUGIN_REF=$(git -C "$PLUGIN_DIR" remote show origin 2>/dev/null | grep 'HEAD branch' | awk '{print $NF}')
+    PLUGIN_REF=$(git -C "$PLUGIN_DIR" remote show origin 2>/dev/null | grep 'HEAD branch' | awk '{print $NF}' || true)
     if [[ -z "$PLUGIN_REF" ]]; then
       # fallback：看本地有 main 还是 master
       if git -C "$PLUGIN_DIR" rev-parse --verify origin/main &>/dev/null; then
@@ -530,7 +530,7 @@ if ! $SELFCHECK_ONLY && [[ -d "$PLUGIN_DIR/.git" ]]; then
     if git -C "$PLUGIN_DIR" fetch origin 2>&1; then
       if git -C "$PLUGIN_DIR" checkout "$PLUGIN_REF" 2>&1; then
         # 分支才 pull，tag 不需要
-        if git -C "$PLUGIN_DIR" symbolic-ref HEAD 2>/dev/null; then
+        if git -C "$PLUGIN_DIR" symbolic-ref HEAD >/dev/null 2>&1; then
           git -C "$PLUGIN_DIR" pull origin "$PLUGIN_REF" 2>&1 || warn "git pull 失败，但 checkout 成功 / git pull failed, but checkout succeeded"
         fi
         INSTALLED_REF=$(git -C "$PLUGIN_DIR" rev-parse --short HEAD 2>/dev/null || echo "$PLUGIN_REF")
@@ -1107,7 +1107,10 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
     CONFIG_JSON='{}'
   else
     if [[ -f "${PROBE_RESULT:-}" ]]; then
-      CONFIG_JSON=$(gen_config_from_probe "$PROBE_RESULT" "$TEMPLATE")
+      CONFIG_JSON=$(gen_config_from_probe "$PROBE_RESULT" "$TEMPLATE") || {
+        warn "配置生成失败 / Config generation failed from probe result."
+        CONFIG_JSON='{}'
+      }
     else
       # 没有探测结果（跳过了探测），用预设生成
       warn "无探测结果，使用预设默认值 / No probe result, using preset defaults."
@@ -1130,8 +1133,11 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
           rerank: { available: false, reason: 'no probe data' },
         };
         require('fs').writeFileSync('$PROBE_RESULT', JSON.stringify(result, null, 2));
-      "
-      CONFIG_JSON=$(gen_config_from_probe "$PROBE_RESULT" "$TEMPLATE")
+      " || warn "临时探测文件写入失败 / Failed to write temp probe file."
+      CONFIG_JSON=$(gen_config_from_probe "$PROBE_RESULT" "$TEMPLATE") || {
+        warn "配置生成失败 / Config generation failed."
+        CONFIG_JSON='{}'
+      }
     fi
   fi
 
