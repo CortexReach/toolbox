@@ -338,8 +338,8 @@ detect_plugin_dir() {
     local registered
     registered=$(jq -r '.plugins.load.paths[]? // empty' "$oc_json" 2>/dev/null \
       | while IFS= read -r p; do
-          # 展开 ~ 开头的路径
-          eval p="$p" 2>/dev/null || true
+          # 展开 ~ 开头的路径（不用 eval，避免命令注入 / tilde-expand only, no eval to avoid injection）
+          p="${p/#\~/$HOME}"
           if [[ -f "$p/package.json" ]] && grep -q '"memory-lancedb-pro"' "$p/package.json" 2>/dev/null; then
             echo "$p"
             break
@@ -563,16 +563,16 @@ UPGRADE_DONE=false
 
 if [[ -d "$PLUGIN_DIR" && -f "$PLUGIN_DIR/package.json" ]]; then
   FRESH_INSTALL=false
-  LOCAL_VER=$(node -e "console.log(require('$PLUGIN_DIR/package.json').version)" 2>/dev/null || echo "unknown")
+  LOCAL_VER=$(PLUGIN_DIR_ENV="$PLUGIN_DIR" node -e "console.log(require(process.env.PLUGIN_DIR_ENV+'/package.json').version)" 2>/dev/null || echo "unknown")
   success "检测到已安装版本 / Installed version: v$LOCAL_VER"
   info "插件路径 / Plugin path: $PLUGIN_DIR"
 
   # 检查配置是否完整（插件目录在但 openclaw.json 里没注册）
   CONFIG_MISSING=false
   if [[ -f "$OPENCLAW_JSON" ]]; then
-    HAS_ENTRY=$(node -e "
+    HAS_ENTRY=$(OC_JSON_ENV="$OPENCLAW_JSON" node -e "
       try {
-        const d = JSON.parse(require('fs').readFileSync('$OPENCLAW_JSON','utf8'));
+        const d = JSON.parse(require('fs').readFileSync(process.env.OC_JSON_ENV,'utf8'));
         const e = d?.plugins?.entries?.['memory-lancedb-pro'];
         process.stdout.write(e ? 'yes' : 'no');
       } catch(e) { process.stdout.write('no'); }
@@ -1271,6 +1271,7 @@ NODE
     "load": {
       "paths": ["$PLUGIN_DIR"]
     },
+    "allow": ["memory-lancedb-pro"],
     "entries": {
       "memory-lancedb-pro": {
         "enabled": true,
@@ -1343,9 +1344,11 @@ MERGEOF
       .plugins //= {} |
       .plugins.load //= {} |
       .plugins.load.paths //= [] |
+      .plugins.allow //= [] |
       .plugins.entries //= {} |
       .plugins.slots //= {} |
       .plugins.load.paths = (.plugins.load.paths + $new.plugins.load.paths | unique) |
+      .plugins.allow = (.plugins.allow + $new.plugins.allow | unique) |
       .plugins.entries["memory-lancedb-pro"] = $new.plugins.entries["memory-lancedb-pro"] |
       .plugins.slots.memory = $new.plugins.slots.memory
     ' "$OPENCLAW_JSON")
@@ -1649,6 +1652,15 @@ if [[ "$PASS" -eq "$TOTAL" ]] && ! $DRY_RUN; then
             rerank)
               RERANK_KEY_VAL=$(jq -r "$CFG_PATH.embedding.apiKey // \"\"" "$OPENCLAW_JSON" 2>/dev/null)
               EMBED_BASE_URL=$(jq -r "$CFG_PATH.embedding.baseURL // \"\"" "$OPENCLAW_JSON" 2>/dev/null)
+              # 根据 embedding provider 确定 rerank 端点 / Detect rerank endpoint from embedding provider
+              RERANK_EP="https://api.jina.ai/v1/rerank"
+              RERANK_MDL="jina-reranker-v3"
+              RERANK_PROV="jina"
+              if [[ "$EMBED_BASE_URL" == *"dashscope"* ]]; then
+                RERANK_EP="https://dashscope.aliyuncs.com/compatible-api/v1/reranks"
+                RERANK_MDL="qwen3-rerank"
+                RERANK_PROV="jina"  # DashScope rerank 响应格式兼容 Jina / DashScope rerank is Jina-compatible
+              fi
               # Ollama / 本地模型没有在线 rerank 能力
               if [[ "$RERANK_KEY_VAL" == "ollama" || "$EMBED_BASE_URL" == *"localhost:11434"* || "$EMBED_BASE_URL" == *"127.0.0.1:11434"* ]]; then
                 warn "rerank 需要在线 API（如 Jina），Ollama 本地模型不支持 / Rerank requires an online API (e.g. Jina). Ollama doesn't support rerank."
@@ -1665,14 +1677,21 @@ if [[ "$PASS" -eq "$TOTAL" ]] && ! $DRY_RUN; then
                 warn "rerank 需要 API Key，请先配置 / Rerank requires API Key"
                 continue
               fi
-              if jq_safe_write "
-                $CFG_PATH.retrieval.rerank = \"cross-encoder\" |
-                $CFG_PATH.retrieval.rerankApiKey = \"$RERANK_KEY_VAL\" |
-                $CFG_PATH.retrieval.rerankModel = \"jina-reranker-v3\" |
-                $CFG_PATH.retrieval.rerankEndpoint = \"https://api.jina.ai/v1/rerank\" |
-                $CFG_PATH.retrieval.rerankProvider = \"jina\" |
-                $CFG_PATH.retrieval.hardMinScore = 0.35
-              " "$OPENCLAW_JSON"; then
+              # 使用 --arg 传递 API key，避免特殊字符注入 jq 表达式
+              # Pass API key via --arg to avoid special-char injection in jq expression
+              if jq_safe_write \
+                --arg rkey "$RERANK_KEY_VAL" \
+                --arg rep  "$RERANK_EP" \
+                --arg rmdl "$RERANK_MDL" \
+                --arg rprov "$RERANK_PROV" \
+                "
+                  $CFG_PATH.retrieval.rerank = \"cross-encoder\" |
+                  $CFG_PATH.retrieval.rerankApiKey = \$rkey |
+                  $CFG_PATH.retrieval.rerankModel = \$rmdl |
+                  $CFG_PATH.retrieval.rerankEndpoint = \$rep |
+                  $CFG_PATH.retrieval.rerankProvider = \$rprov |
+                  $CFG_PATH.retrieval.hardMinScore = 0.35
+                " "$OPENCLAW_JSON"; then
                 success "rerank enabled / 已开启精排"
                 NEED_RESTART=true
               else
