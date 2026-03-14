@@ -1,0 +1,35 @@
+{
+  "metadata": {
+    "label": "example self-check config"
+  },
+  "embedding": {
+    "apiKey": "YOUR_EMBEDDING_API_KEY",
+    "baseURL": "https://api.jina.ai/v1",
+    "model": "jina-embeddings-v5-text-small",
+    "dimensions": 1024,
+    "queryExtraBody": {
+      "task": "retrieval.query",
+      "normalized": true
+    },
+    "passageExtraBody": {
+      "task": "retrieval.passage",
+      "normalized": true
+    }
+  },
+  "rerank": {
+    "apiKey": "YOUR_RERANK_API_KEY",
+    "endpoint": "https://api.jina.ai/v1/rerank",
+    "model": "jina-reranker-v3"
+  },
+  "hostModel": {
+    "apiKey": "YOUR_HOST_MODEL_API_KEY",
+    "baseURL": "https://api.openai.com/v1",
+    "model": "gpt-4.1-mini"
+  },
+  "thresholds": {
+    "embeddingGap": 0.08,
+    "rerankLatencyMs": 2200,
+    "hostLatencyMs": 5000,
+    "jsonRuns": 2
+  }
+}
