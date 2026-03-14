@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-#  memory-lancedb-pro 一键安装 / 升级脚本 v3.3
+#  memory-lancedb-pro 一键安装 / 升级脚本 v3.4
 #
 #  用法：
 #    bash setup-memory.sh            # 安装（已安装则进入升级模式）
@@ -9,6 +9,14 @@
 #    bash setup-memory.sh --selfcheck-only  # 只跑能力自检，不改配置
 #    bash setup-memory.sh --uninstall # 还原配置并移除插件
 #    bash setup-memory.sh --ref v1.2.0  # 锁定到指定 tag/branch/commit
+#
+#  v3.4 变化：
+#    - 新增 plugins.allow 白名单（修复 git-clone 插件 "plugin not found"）
+#    - 修复 eval 命令注入（tilde 展开改用纯参数替换）
+#    - 修复 node -e 路径注入（改用环境变量传入）
+#    - 修复 rerank API key 含特殊字符时 jq 注入（改用 --arg）
+#    - DashScope embedding 用户自动检测 rerank 端点（qwen3-rerank）
+#    - 分支检测优化：fetch --prune 清理残留远程分支，fallback 硬编码 master
 #
 #  v3.3 变化：
 #    - 可选功能写入后、Gateway 重启前再跑一次 schema 过滤（修复 additional properties 崩溃）
@@ -19,7 +27,7 @@
 #    - npm 安装的用户不受影响（npm update 是用户自己管的）
 #
 #  v3.1 变化：
-#    - --ref 参数：锁定 clone 版本（tag/branch/commit），默认 main
+#    - --ref 参数：锁定 clone 版本（tag/branch/commit），默认 master
 #    - Schema 动态过滤：写入配置前按插件 configSchema 自动裁剪非法字段
 #    - 写入前双重校验：过滤前后各验一次 JSON 合法性
 #
@@ -267,7 +275,7 @@ upgrade_plugin() {
   fi
 
   local new_ver
-  new_ver=$(node -e "console.log(require('$tmp_dir/plugin/package.json').version)" 2>/dev/null || echo "")
+  new_ver=$(P_DIR="$tmp_dir/plugin" node -e "console.log(require(process.env.P_DIR+'/package.json').version)" 2>/dev/null || echo "")
   if [[ -z "$new_ver" ]]; then
     rm -rf "$tmp_dir"
     warn "新版本健康检查失败，保持当前版本 $old_ver / Health check failed, keeping v$old_ver"
@@ -280,7 +288,7 @@ upgrade_plugin() {
   mv "$tmp_dir/plugin" "$install_dir"
   rm -rf "$tmp_dir"
 
-  if node -e "require('$install_dir/package.json')" 2>/dev/null; then
+  if P_DIR="$install_dir" node -e "require(process.env.P_DIR+'/package.json')" 2>/dev/null; then
     success "升级完成 / Upgrade complete: $old_ver → $new_ver"
     if [[ -d "$HOME/.Trash" ]]; then
       mv "$backup_dir" "$HOME/.Trash/" 2>/dev/null || true
@@ -295,11 +303,14 @@ upgrade_plugin() {
   fi
 }
 
-# jq 安全写入
+# jq 安全写入（支持 --arg 等额外 jq 参数）
+# 用法：jq_safe_write [--arg name val ...] "filter" "target_file"
 jq_safe_write() {
+  local args=()
+  while [[ "$1" == --* ]]; do args+=("$1" "$2" "$3"); shift 3; done
   local filter="$1"
   local target="$2"
-  jq "$filter" "$target" > "${target}.tmp" || { rm -f "${target}.tmp"; return 1; }
+  jq "${args[@]+"${args[@]}"}" "$filter" "$target" > "${target}.tmp" || { rm -f "${target}.tmp"; return 1; }
   if jq empty "${target}.tmp" 2>/dev/null; then
     mv "${target}.tmp" "$target" || { rm -f "${target}.tmp"; warn "写入失败 / Write failed: $target"; return 1; }
   else
@@ -338,8 +349,8 @@ detect_plugin_dir() {
     local registered
     registered=$(jq -r '.plugins.load.paths[]? // empty' "$oc_json" 2>/dev/null \
       | while IFS= read -r p; do
-          # 展开 ~ 开头的路径
-          eval p="$p" 2>/dev/null || true
+          # 展开 ~ 开头的路径（纯参数替换，避免命令注入）
+          p="${p/#\~/$HOME}"
           if [[ -f "$p/package.json" ]] && grep -q '"memory-lancedb-pro"' "$p/package.json" 2>/dev/null; then
             echo "$p"
             break
@@ -513,17 +524,13 @@ OLD_HEAD=""
 if ! $SELFCHECK_ONLY && [[ -d "$PLUGIN_DIR/.git" ]]; then
   echo ""
   info "检测到已有 git 仓库，自动更新 / Git repo detected, updating..."
-  # 如果没指定 --ref，自动检测远程默认分支（main 或 master）
+  # 同步远程分支状态，清理已删除的远程分支（如 main → main-legacy）
+  git -C "$PLUGIN_DIR" fetch --prune --quiet 2>/dev/null || true
+  # 如果没指定 --ref，自动检测远程默认分支
   if [[ -z "$PLUGIN_REF" ]]; then
-    PLUGIN_REF=$(git -C "$PLUGIN_DIR" remote show origin 2>/dev/null | grep 'HEAD branch' | awk '{print $NF}' || true)
-    if [[ -z "$PLUGIN_REF" ]]; then
-      # fallback：看本地有 main 还是 master
-      if git -C "$PLUGIN_DIR" rev-parse --verify origin/main &>/dev/null; then
-        PLUGIN_REF="main"
-      else
-        PLUGIN_REF="master"
-      fi
-    fi
+    PLUGIN_REF=$(git -C "$PLUGIN_DIR" remote show origin 2>/dev/null \
+      | awk '/HEAD branch/{print $NF}')
+    PLUGIN_REF="${PLUGIN_REF:-master}"
     info "自动检测到默认分支 / Default branch: $PLUGIN_REF"
   fi
   OLD_HEAD=$(git -C "$PLUGIN_DIR" rev-parse --short HEAD 2>/dev/null || echo "unknown")
@@ -563,16 +570,16 @@ UPGRADE_DONE=false
 
 if [[ -d "$PLUGIN_DIR" && -f "$PLUGIN_DIR/package.json" ]]; then
   FRESH_INSTALL=false
-  LOCAL_VER=$(node -e "console.log(require('$PLUGIN_DIR/package.json').version)" 2>/dev/null || echo "unknown")
+  LOCAL_VER=$(P_DIR="$PLUGIN_DIR" node -e "console.log(require(process.env.P_DIR+'/package.json').version)" 2>/dev/null || echo "unknown")
   success "检测到已安装版本 / Installed version: v$LOCAL_VER"
   info "插件路径 / Plugin path: $PLUGIN_DIR"
 
   # 检查配置是否完整（插件目录在但 openclaw.json 里没注册）
   CONFIG_MISSING=false
   if [[ -f "$OPENCLAW_JSON" ]]; then
-    HAS_ENTRY=$(node -e "
+    HAS_ENTRY=$(OC_JSON="$OPENCLAW_JSON" node -e "
       try {
-        const d = JSON.parse(require('fs').readFileSync('$OPENCLAW_JSON','utf8'));
+        const d = JSON.parse(require('fs').readFileSync(process.env.OC_JSON,'utf8'));
         const e = d?.plugins?.entries?.['memory-lancedb-pro'];
         process.stdout.write(e ? 'yes' : 'no');
       } catch(e) { process.stdout.write('no'); }
@@ -625,7 +632,7 @@ if ! $FRESH_INSTALL && ! $SELFCHECK_ONLY; then
       else
         if upgrade_plugin "$PLUGIN_DIR" "$LOCAL_VER"; then
           UPGRADE_DONE=true
-          LOCAL_VER=$(node -e "console.log(require('$PLUGIN_DIR/package.json').version)" 2>/dev/null || echo "$REMOTE_VER")
+          LOCAL_VER=$(P_DIR="$PLUGIN_DIR" node -e "console.log(require(process.env.P_DIR+'/package.json').version)" 2>/dev/null || echo "$REMOTE_VER")
         else
           echo ""
           echo "======================================================"
@@ -1271,6 +1278,7 @@ NODE
     "load": {
       "paths": ["$PLUGIN_DIR"]
     },
+    "allow": ["memory-lancedb-pro"],
     "entries": {
       "memory-lancedb-pro": {
         "enabled": true,
@@ -1343,9 +1351,11 @@ MERGEOF
       .plugins //= {} |
       .plugins.load //= {} |
       .plugins.load.paths //= [] |
+      .plugins.allow //= [] |
       .plugins.entries //= {} |
       .plugins.slots //= {} |
       .plugins.load.paths = (.plugins.load.paths + $new.plugins.load.paths | unique) |
+      .plugins.allow = (.plugins.allow + $new.plugins.allow | unique) |
       .plugins.entries["memory-lancedb-pro"] = $new.plugins.entries["memory-lancedb-pro"] |
       .plugins.slots.memory = $new.plugins.slots.memory
     ' "$OPENCLAW_JSON")
@@ -1649,6 +1659,15 @@ if [[ "$PASS" -eq "$TOTAL" ]] && ! $DRY_RUN; then
             rerank)
               RERANK_KEY_VAL=$(jq -r "$CFG_PATH.embedding.apiKey // \"\"" "$OPENCLAW_JSON" 2>/dev/null)
               EMBED_BASE_URL=$(jq -r "$CFG_PATH.embedding.baseURL // \"\"" "$OPENCLAW_JSON" 2>/dev/null)
+              # 根据 embedding provider 自动检测 rerank 端点
+              RERANK_EP="https://api.jina.ai/v1/rerank"
+              RERANK_MDL="jina-reranker-v3"
+              RERANK_PROV="jina"
+              if [[ "$EMBED_BASE_URL" == *"dashscope"* ]]; then
+                RERANK_EP="https://dashscope.aliyuncs.com/compatible-api/v1/reranks"
+                RERANK_MDL="qwen3-rerank"
+                RERANK_PROV="jina"  # DashScope compatible-api 响应格式兼容 Jina
+              fi
               # Ollama / 本地模型没有在线 rerank 能力
               if [[ "$RERANK_KEY_VAL" == "ollama" || "$EMBED_BASE_URL" == *"localhost:11434"* || "$EMBED_BASE_URL" == *"127.0.0.1:11434"* ]]; then
                 warn "rerank 需要在线 API（如 Jina），Ollama 本地模型不支持 / Rerank requires an online API (e.g. Jina). Ollama doesn't support rerank."
@@ -1665,12 +1684,18 @@ if [[ "$PASS" -eq "$TOTAL" ]] && ! $DRY_RUN; then
                 warn "rerank 需要 API Key，请先配置 / Rerank requires API Key"
                 continue
               fi
-              if jq_safe_write "
+              # 用 --arg 传递变量，避免特殊字符注入 jq 表达式
+              if jq_safe_write \
+                --arg rkey "$RERANK_KEY_VAL" \
+                --arg rep "$RERANK_EP" \
+                --arg rmdl "$RERANK_MDL" \
+                --arg rprov "$RERANK_PROV" \
+                "
                 $CFG_PATH.retrieval.rerank = \"cross-encoder\" |
-                $CFG_PATH.retrieval.rerankApiKey = \"$RERANK_KEY_VAL\" |
-                $CFG_PATH.retrieval.rerankModel = \"jina-reranker-v3\" |
-                $CFG_PATH.retrieval.rerankEndpoint = \"https://api.jina.ai/v1/rerank\" |
-                $CFG_PATH.retrieval.rerankProvider = \"jina\" |
+                $CFG_PATH.retrieval.rerankApiKey = \$rkey |
+                $CFG_PATH.retrieval.rerankModel = \$rmdl |
+                $CFG_PATH.retrieval.rerankEndpoint = \$rep |
+                $CFG_PATH.retrieval.rerankProvider = \$rprov |
                 $CFG_PATH.retrieval.hardMinScore = 0.35
               " "$OPENCLAW_JSON"; then
                 success "rerank enabled / 已开启精排"
