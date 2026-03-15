@@ -91,6 +91,8 @@ PROBE_SCRIPT="$SCRIPT_DIR/scripts/probe-endpoint.mjs"
 VALIDATE_SCRIPT="$SCRIPT_DIR/scripts/config-validate.mjs"
 GITHUB_REPO="CortexReach/memory-lancedb-pro"
 GITHUB_URL="https://github.com/$GITHUB_REPO.git"
+TOOLBOX_RAW_BASE="https://raw.githubusercontent.com/CortexReach/toolbox/main/memory-lancedb-pro-setup/scripts"
+HELPER_SCRIPTS_READY=false
 
 # ── 颜色输出 ──
 RED='\033[0;31m'
@@ -106,6 +108,64 @@ success() { echo -e "${GREEN}[OK]${NC}   $1"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC} $1"; }
 fail()    { echo -e "${RED}[ERR]${NC}  $1"; exit 1; }
 dry()     { echo -e "${YELLOW}[DRY-RUN]${NC} 将会执行 / Would run: $1"; }
+
+download_helper_script() {
+  local script_name="$1"
+  local destination="$2"
+  local url="$TOOLBOX_RAW_BASE/$script_name"
+
+  if command -v curl &>/dev/null; then
+    curl -fsSL "$url" -o "$destination" >/dev/null 2>&1
+    return $?
+  fi
+
+  if command -v wget &>/dev/null; then
+    wget -q -O "$destination" "$url" >/dev/null 2>&1
+    return $?
+  fi
+
+  return 127
+}
+
+ensure_helper_scripts() {
+  $HELPER_SCRIPTS_READY && return 0
+
+  local missing=()
+  [[ -f "$SELF_CHECK_SCRIPT" ]] || missing+=("memory-selfcheck.mjs")
+  [[ -f "$PROBE_SCRIPT" ]] || missing+=("probe-endpoint.mjs")
+  [[ -f "$VALIDATE_SCRIPT" ]] || missing+=("config-validate.mjs")
+
+  if [[ ${#missing[@]} -eq 0 ]]; then
+    HELPER_SCRIPTS_READY=true
+    return 0
+  fi
+
+  warn "检测到辅助脚本缺失 / Helper scripts missing: ${missing[*]}"
+
+  local helper_dir
+  helper_dir="$(mktemp -d "${TMPDIR:-/tmp}/memory-setup-scripts-XXXXXX")"
+  local failed=()
+  local script_name destination
+  for script_name in "${missing[@]}"; do
+    destination="$helper_dir/$script_name"
+    if download_helper_script "$script_name" "$destination"; then
+      case "$script_name" in
+        memory-selfcheck.mjs) SELF_CHECK_SCRIPT="$destination" ;;
+        probe-endpoint.mjs) PROBE_SCRIPT="$destination" ;;
+        config-validate.mjs) VALIDATE_SCRIPT="$destination" ;;
+      esac
+    else
+      failed+=("$script_name")
+    fi
+  done
+
+  if [[ ${#failed[@]} -gt 0 ]]; then
+    fail "无法下载辅助脚本 / Failed to download helper scripts: ${failed[*]}. Please clone the toolbox repo or keep the scripts/ directory next to setup-memory.sh."
+  fi
+
+  success "辅助脚本已补齐 / Helper scripts downloaded for standalone mode"
+  HELPER_SCRIPTS_READY=true
+}
 
 echo ""
 echo -e "${BOLD}========================================${NC}"
@@ -364,6 +424,122 @@ jq_safe_write() {
   fi
 }
 
+# 精确清理 openclaw.json 里的 memory-lancedb-pro 配置（jq 不可用时回退到 node）
+cleanup_memory_plugin_config() {
+  local target="$1"
+  local plugin_dir="${2:-}"
+  local tmp
+  tmp=$(mktemp)
+  _TMPFILES+=("$tmp")
+
+  if command -v jq &>/dev/null; then
+    if ! jq --arg plugin_dir "$plugin_dir" '
+      def trim_slash:
+        if type == "string" then sub("/+$"; "") else . end;
+      def is_memory_plugin_path:
+        if type != "string" then false
+        else
+          (trim_slash) as $p
+          | (($plugin_dir | trim_slash)) as $target
+          | ($p == $target or ($p | endswith("/memory-lancedb-pro")))
+        end;
+
+      if .plugins? then
+        (if (.plugins.load.paths? | type) == "array" then
+           .plugins.load.paths |= map(select(is_memory_plugin_path | not))
+         else . end)
+        | (if (.plugins.allow? | type) == "array" then
+             .plugins.allow |= map(select(. != "memory-lancedb-pro"))
+           else . end)
+        | (if (.plugins.entries? | type) == "object" then
+             del(.plugins.entries["memory-lancedb-pro"])
+           else . end)
+        | (if .plugins.slots.memory? == "memory-lancedb-pro" then
+             del(.plugins.slots.memory)
+           else . end)
+        | (if (.plugins.load.paths? | type) == "array" and (.plugins.load.paths | length) == 0 then del(.plugins.load.paths) else . end)
+        | (if (.plugins.load? | type) == "object" and (.plugins.load | length) == 0 then del(.plugins.load) else . end)
+        | (if (.plugins.allow? | type) == "array" and (.plugins.allow | length) == 0 then del(.plugins.allow) else . end)
+        | (if (.plugins.entries? | type) == "object" and (.plugins.entries | length) == 0 then del(.plugins.entries) else . end)
+        | (if (.plugins.slots? | type) == "object" and (.plugins.slots | length) == 0 then del(.plugins.slots) else . end)
+        | (if (.plugins? | type) == "object" and (.plugins | length) == 0 then del(.plugins) else . end)
+      else . end
+    ' "$target" > "$tmp"; then
+      rm -f "$tmp"
+      return 1
+    fi
+  else
+    TARGET_JSON_ENV="$target" PLUGIN_DIR_ENV="$plugin_dir" node - <<'NODE' > "$tmp"
+const fs = require('fs');
+const target = process.env.TARGET_JSON_ENV;
+const pluginDir = (process.env.PLUGIN_DIR_ENV || '').replace(/\/+$/g, '');
+const data = JSON.parse(fs.readFileSync(target, 'utf8'));
+
+const isMemoryPluginPath = value => {
+  if (typeof value !== 'string') return false;
+  const normalized = value.replace(/\/+$/g, '');
+  return normalized === pluginDir || normalized.endsWith('/memory-lancedb-pro');
+};
+
+if (data && data.plugins && typeof data.plugins === 'object') {
+  const plugins = data.plugins;
+
+  if (plugins.load && Array.isArray(plugins.load.paths)) {
+    plugins.load.paths = plugins.load.paths.filter(v => !isMemoryPluginPath(v));
+    if (plugins.load.paths.length === 0) delete plugins.load.paths;
+    if (Object.keys(plugins.load).length === 0) delete plugins.load;
+  }
+
+  if (Array.isArray(plugins.allow)) {
+    plugins.allow = plugins.allow.filter(v => v !== 'memory-lancedb-pro');
+    if (plugins.allow.length === 0) delete plugins.allow;
+  }
+
+  if (plugins.entries && typeof plugins.entries === 'object') {
+    delete plugins.entries['memory-lancedb-pro'];
+    if (Object.keys(plugins.entries).length === 0) delete plugins.entries;
+  }
+
+  if (plugins.slots && typeof plugins.slots === 'object') {
+    if (plugins.slots.memory === 'memory-lancedb-pro') delete plugins.slots.memory;
+    if (Object.keys(plugins.slots).length === 0) delete plugins.slots;
+  }
+
+  if (Object.keys(plugins).length === 0) delete data.plugins;
+}
+
+process.stdout.write(JSON.stringify(data, null, 2));
+NODE
+    if [[ $? -ne 0 ]]; then
+      rm -f "$tmp"
+      return 1
+    fi
+  fi
+
+  if ! TARGET_JSON_ENV="$tmp" node -e "JSON.parse(require('fs').readFileSync(process.env.TARGET_JSON_ENV,'utf8'))" 2>/dev/null; then
+    rm -f "$tmp"
+    return 1
+  fi
+
+  if cmp -s "$target" "$tmp"; then
+    rm -f "$tmp"
+    return 2
+  fi
+
+  mv "$tmp" "$target"
+  return 0
+}
+
+probe_result_is_valid() {
+  local probe_file="${1:-}"
+  [[ -n "$probe_file" && -s "$probe_file" ]] || return 1
+  PROBE_FILE_ENV="$probe_file" node -e "
+    const fs = require('fs');
+    const probe = JSON.parse(fs.readFileSync(process.env.PROBE_FILE_ENV, 'utf8'));
+    if (!probe || typeof probe !== 'object') process.exit(1);
+  " >/dev/null 2>&1
+}
+
 # 展示单个功能状态
 show_feature() {
   local status="$1" name="$2" desc="$3" extra="${4:-}"
@@ -432,25 +608,6 @@ if $UNINSTALL; then
     fail "找不到 / Not found: $OPENCLAW_JSON"
   fi
 
-  LATEST_BACKUP=$(ls -t "$OPENCLAW_JSON".backup.* 2>/dev/null | head -1 || echo "")
-
-  if [[ -n "$LATEST_BACKUP" ]]; then
-    echo ""
-    echo "  找到备份文件 / Found backup: $LATEST_BACKUP"
-    echo "  备份时间 / Backup time: $(stat -f '%Sm' "$LATEST_BACKUP" 2>/dev/null || stat -c '%y' "$LATEST_BACKUP" 2>/dev/null || echo '未知 / unknown')"
-    echo ""
-    read -p "  要还原这个备份吗？/ Restore this backup? (y/n) [y]: " RESTORE
-    RESTORE=${RESTORE:-y}
-    if [[ "$RESTORE" == "y" || "$RESTORE" == "Y" ]]; then
-      cp "$OPENCLAW_JSON" "$OPENCLAW_JSON.before-uninstall.$(date +%Y%m%d_%H%M%S)"
-      cp "$LATEST_BACKUP" "$OPENCLAW_JSON"
-      success "openclaw.json 已还原 / openclaw.json restored"
-    fi
-  else
-    warn "没有找到备份文件，跳过配置还原 / No backup found, skipping config restore."
-    echo "  如果要手动清理，请编辑 / To clean up manually, edit $OPENCLAW_JSON"
-  fi
-
   WORKSPACE=$(openclaw config get agents.defaults.workspace 2>/dev/null | tr -d '"' | tr -d ' ' || echo "")
   if [[ -z "$WORKSPACE" || ! -d "$WORKSPACE" ]] && [[ -f "$OPENCLAW_JSON" ]]; then
     WORKSPACE=$(node -e "
@@ -463,6 +620,24 @@ if $UNINSTALL; then
   fi
   [[ -z "$WORKSPACE" || ! -d "$WORKSPACE" ]] && for g in "$HOME/.openclaw/workspace" "$HOME/.openclaw-workspace"; do [[ -d "$g" ]] && WORKSPACE="$g" && break; done
   PLUGIN_DIR=$(detect_plugin_dir "$WORKSPACE" "$OPENCLAW_JSON")
+
+  if [[ -f "$OPENCLAW_JSON" ]]; then
+    CLEANUP_BACKUP="$OPENCLAW_JSON.before-uninstall.cleanup.$(date +%Y%m%d_%H%M%S)"
+    cp "$OPENCLAW_JSON" "$CLEANUP_BACKUP"
+    success "已备份当前配置 / Current config backed up → $CLEANUP_BACKUP"
+    if cleanup_memory_plugin_config "$OPENCLAW_JSON" "$PLUGIN_DIR"; then
+      success "已清理 openclaw.json 中的 memory-lancedb-pro 配置 / Removed memory-lancedb-pro config from openclaw.json"
+    else
+      rc=$?
+      rm -f "$CLEANUP_BACKUP"
+      if [[ $rc -eq 2 ]]; then
+        info "openclaw.json 中未发现残留的 memory-lancedb-pro 配置 / No residual memory-lancedb-pro config found"
+      else
+        fail "清理 openclaw.json 中的 memory-lancedb-pro 配置失败 / Failed to remove memory-lancedb-pro config from openclaw.json"
+      fi
+    fi
+  fi
+
   if [[ -d "$PLUGIN_DIR" ]]; then
     echo ""
     read -p "  要删除插件目录吗？/ Delete plugin dir $PLUGIN_DIR? (y/n) [n]: " DEL_PLUGIN
@@ -494,7 +669,12 @@ if ! command -v node &>/dev/null; then
   fail "找不到 node / Node.js not found. Please install Node.js (v18+): https://nodejs.org"
 fi
 NODE_VER=$(node --version)
+NODE_MAJOR=$(node -p "Number(process.versions.node.split('.')[0])" 2>/dev/null || echo "0")
 success "Node.js $NODE_VER"
+if [[ ! "$NODE_MAJOR" =~ ^[0-9]+$ ]] || [[ "$NODE_MAJOR" -lt 18 ]]; then
+  fail "Node.js 版本过低 / Node.js too old: $NODE_VER. Please upgrade to Node.js 18+."
+fi
+ensure_helper_scripts
 
 if $SELFCHECK_ONLY; then
   warn "--selfcheck-only 模式：跳过安装，只做能力探测 / Skipping install, probe only."
@@ -797,6 +977,7 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
   API_BASE_URL=""
   API_KEY=""
   EMBEDDING_MODEL=""
+  DEFAULT_EMBEDDING_MODEL=""
   RERANK_ENDPOINT=""
   RERANK_API_KEY=""
   RERANK_MODEL=""
@@ -821,6 +1002,8 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
   case "$PROVIDER" in
     jina)
       API_BASE_URL="https://api.jina.ai/v1"
+      DEFAULT_EMBEDDING_MODEL="jina-embeddings-v5-text-small"
+      EMBEDDING_MODEL="$DEFAULT_EMBEDDING_MODEL"
       echo ""
       echo "  Jina 免费注册就能用 / Free signup: https://jina.ai/"
       echo ""
@@ -841,6 +1024,8 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
 
     dashscope)
       API_BASE_URL="https://dashscope.aliyuncs.com/compatible-mode/v1"
+      DEFAULT_EMBEDDING_MODEL="text-embedding-v4"
+      EMBEDDING_MODEL="$DEFAULT_EMBEDDING_MODEL"
       echo ""
       echo "  DashScope 控制台 / Console: https://dashscope.console.aliyun.com/"
       echo ""
@@ -857,8 +1042,11 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
 
     siliconflow)
       API_BASE_URL="https://api.siliconflow.cn/v1"
+      DEFAULT_EMBEDDING_MODEL="BAAI/bge-m3"
+      EMBEDDING_MODEL="$DEFAULT_EMBEDDING_MODEL"
       echo ""
       echo "  SiliconFlow 控制台 / Console: https://cloud.siliconflow.cn/"
+      echo "  默认 Embedding 模型 / Default embedding model: $DEFAULT_EMBEDDING_MODEL"
       echo ""
       read -p "  请粘贴 SiliconFlow API Key / Paste SiliconFlow API Key: " API_KEY
       if [[ -z "$API_KEY" ]]; then
@@ -873,6 +1061,8 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
 
     openai)
       API_BASE_URL="https://api.openai.com/v1"
+      DEFAULT_EMBEDDING_MODEL="text-embedding-3-small"
+      EMBEDDING_MODEL="$DEFAULT_EMBEDDING_MODEL"
       echo ""
       echo "  OpenAI 控制台 / Console: https://platform.openai.com/api-keys"
       echo ""
@@ -907,6 +1097,7 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
 
       API_BASE_URL="http://localhost:11434/v1"
       API_KEY="ollama"
+      DEFAULT_EMBEDDING_MODEL="nomic-embed-text"
 
       # 列出本地 embedding 模型
       echo ""
@@ -1039,7 +1230,9 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
     info "正在探测，请稍候 / Probing, please wait..."
     echo ""
 
-    if node "$PROBE_SCRIPT" "${PROBE_ARGS[@]}" 2>/dev/null; then
+    PROBE_ERR_LOG="$(mktemp "${TMPDIR:-/tmp}/memory-probe-stderr-XXXXXX")"
+    _TMPFILES+=("$PROBE_ERR_LOG")
+    if node "$PROBE_SCRIPT" "${PROBE_ARGS[@]}" 2>"$PROBE_ERR_LOG"; then
       # 解析探测结果
       PROBE_EMB_OK=$(node -p "JSON.parse(require('fs').readFileSync('$PROBE_RESULT','utf8')).embedding.available" 2>/dev/null || echo "false")
       PROBE_EMB_MODEL=$(node -p "JSON.parse(require('fs').readFileSync('$PROBE_RESULT','utf8')).embedding.model || 'unknown'" 2>/dev/null || echo "unknown")
@@ -1084,20 +1277,29 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
         exit 0
       fi
     else
-      warn "探测脚本执行失败，使用默认推荐 / Probe script failed, using defaults."
+      PROBE_ERR_MSG=$(sed -n '1p' "$PROBE_ERR_LOG" 2>/dev/null || echo "")
+      if [[ -n "$PROBE_ERR_MSG" ]]; then
+        warn "探测脚本执行失败 / Probe script failed: $PROBE_ERR_MSG"
+      else
+        warn "探测脚本执行失败，使用默认推荐 / Probe script failed, using defaults."
+      fi
       RECOMMENDED_LEVEL="balanced-default"
       if $SELFCHECK_ONLY; then
         fail "--selfcheck-only 模式下探测失败 / Probe failed in selfcheck-only mode."
       fi
       # 探测失败时用已收集的变量生成兜底探测结果，防止下游读到空文件
       # Generate fallback probe result from collected variables so downstream doesn't read empty file
-      PROBE_RESULT_ENV="$PROBE_RESULT" API_BASE_URL_ENV="$API_BASE_URL" API_KEY_ENV="$API_KEY" EMBEDDING_MODEL_ENV="${EMBEDDING_MODEL:-unknown}" \
+      PROBE_HAS_RERANK_ENV="false"
+      if [[ -n "${RERANK_ENDPOINT:-}" && -n "${RERANK_MODEL:-}" ]]; then
+        PROBE_HAS_RERANK_ENV="true"
+      fi
+      PROBE_RESULT_ENV="$PROBE_RESULT" API_BASE_URL_ENV="$API_BASE_URL" API_KEY_ENV="$API_KEY" EMBEDDING_MODEL_ENV="${EMBEDDING_MODEL:-}" DEFAULT_EMBEDDING_MODEL_ENV="${DEFAULT_EMBEDDING_MODEL:-}" RERANK_ENDPOINT_ENV="${RERANK_ENDPOINT:-}" RERANK_MODEL_ENV="${RERANK_MODEL:-}" RERANK_PROVIDER_ENV="${RERANK_PROVIDER:-jina}" RERANK_API_KEY_ENV="${RERANK_API_KEY:-$API_KEY}" PROBE_HAS_RERANK_ENV="$PROBE_HAS_RERANK_ENV" \
         node -e "
           const result = {
             baseURL: process.env.API_BASE_URL_ENV,
             embedding: {
               available: true,
-              model: process.env.EMBEDDING_MODEL_ENV,
+              model: process.env.EMBEDDING_MODEL_ENV || process.env.DEFAULT_EMBEDDING_MODEL_ENV || 'unknown',
               dimensions: 1024,
               apiKey: process.env.API_KEY_ENV,
               baseURL: process.env.API_BASE_URL_ENV,
@@ -1105,7 +1307,14 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
               taskPassage: null,
               normalized: false,
             },
-            rerank: { available: false, reason: 'probe failed, using fallback' },
+            rerank: {
+              available: process.env.PROBE_HAS_RERANK_ENV === 'true',
+              reason: 'probe failed, using fallback',
+              model: process.env.RERANK_MODEL_ENV || '',
+              endpoint: process.env.RERANK_ENDPOINT_ENV || '',
+              provider: process.env.RERANK_PROVIDER_ENV || 'jina',
+              apiKey: process.env.RERANK_API_KEY_ENV || process.env.API_KEY_ENV || '',
+            },
           };
           require('fs').writeFileSync(process.env.PROBE_RESULT_ENV, JSON.stringify(result, null, 2));
         " 2>/dev/null || true
@@ -1119,9 +1328,17 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
   info "第 6 步：选择配置等级 / Choose config level..."
   echo ""
 
-  # 如果 rerank 不可用，pro-rerank 不推荐
+  HAS_CONFIGURED_RERANK=false
+  if [[ -n "${RERANK_ENDPOINT:-}" && -n "${RERANK_MODEL:-}" ]]; then
+    HAS_CONFIGURED_RERANK=true
+  fi
+
   PRO_NOTE=""
-  if [[ "${PROBE_RERANK_OK:-false}" != "true" ]]; then
+  if [[ "${PROBE_RERANK_OK:-false}" == "true" ]]; then
+    PRO_NOTE=""
+  elif $HAS_CONFIGURED_RERANK; then
+    PRO_NOTE=" ${YELLOW}(rerank 已配置，待验证 / configured, unverified)${NC}"
+  else
     PRO_NOTE=" ${YELLOW}(需要 rerank / requires rerank)${NC}"
   fi
 
@@ -1145,14 +1362,20 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
       1) TEMPLATE="lite-safe"; break ;;
       2) TEMPLATE="balanced-default"; break ;;
       3)
-        if [[ "${PROBE_RERANK_OK:-false}" != "true" ]]; then
+        if [[ "${PROBE_RERANK_OK:-false}" == "true" ]]; then
+          TEMPLATE="pro-rerank"; break
+        elif $HAS_CONFIGURED_RERANK; then
+          warn "未能验证 rerank，但已存在预设 rerank 配置 / Rerank probe unavailable, but a configured rerank endpoint/model will be used."
+          read -p "  仍然选择？/ Still choose this? (y/n) [y]: " FORCE_PRO
+          if [[ "${FORCE_PRO:-y}" =~ ^[yY]$ ]]; then
+            TEMPLATE="pro-rerank"; break
+          fi
+        else
           warn "你的 API 不支持 rerank / Your API does not support rerank. Reranking won't work."
           read -p "  仍然选择？/ Still choose this? (y/n) [n]: " FORCE_PRO
           if [[ "${FORCE_PRO:-n}" =~ ^[yY]$ ]]; then
             TEMPLATE="pro-rerank"; break
           fi
-        else
-          TEMPLATE="pro-rerank"; break
         fi
         ;;
       *) warn "无效选择，请输入 1-3 / Invalid, enter 1-3." ;;
@@ -1170,64 +1393,77 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
     local PROBE_FILE="$1"
     local LEVEL="$2"
 
-    PROBE_FILE_ENV="$PROBE_FILE" LEVEL_ENV="$LEVEL" node -e "
+    PROBE_FILE_ENV="$PROBE_FILE" LEVEL_ENV="$LEVEL" EMBEDDING_MODEL_ENV="${EMBEDDING_MODEL:-}" DEFAULT_EMBEDDING_MODEL_ENV="${DEFAULT_EMBEDDING_MODEL:-}" CONFIGURED_RERANK_ENDPOINT_ENV="${RERANK_ENDPOINT:-}" CONFIGURED_RERANK_MODEL_ENV="${RERANK_MODEL:-}" CONFIGURED_RERANK_PROVIDER_ENV="${RERANK_PROVIDER:-jina}" CONFIGURED_RERANK_API_KEY_ENV="${RERANK_API_KEY:-$API_KEY}" node -e "
       const fs = require('fs');
-      const probe = JSON.parse(fs.readFileSync(process.env.PROBE_FILE_ENV, 'utf8'));
-      const level = process.env.LEVEL_ENV;
+      try {
+        const probe = JSON.parse(fs.readFileSync(process.env.PROBE_FILE_ENV, 'utf8'));
+        const level = process.env.LEVEL_ENV;
+        const configuredRerank = {
+          endpoint: process.env.CONFIGURED_RERANK_ENDPOINT_ENV || '',
+          model: process.env.CONFIGURED_RERANK_MODEL_ENV || '',
+          provider: process.env.CONFIGURED_RERANK_PROVIDER_ENV || 'jina',
+          apiKey: process.env.CONFIGURED_RERANK_API_KEY_ENV || '',
+        };
 
-      const emb = probe.embedding || {};
+        const emb = probe.embedding || {};
 
-      const config = {
-        embedding: {
-          apiKey: emb.apiKey || 'YOUR_API_KEY',
-          model: emb.model || 'unknown',
-          baseURL: emb.baseURL || probe.baseURL || '',
-          dimensions: emb.dimensions || 1024,
-        },
-        autoCapture: true,
-        autoRecall: level !== 'lite-safe',
-        retrieval: {
-          mode: 'hybrid',
-          candidatePoolSize: 20,
-          minScore: 0.45,
-          hardMinScore: level === 'pro-rerank' ? 0.35 : 0.55,
-          rerank: 'none',
-          filterNoise: true,
-        },
-        sessionStrategy: 'systemSessionMemory',
-      };
+        const config = {
+          embedding: {
+            apiKey: emb.apiKey || 'YOUR_API_KEY',
+            model: emb.model || process.env.EMBEDDING_MODEL_ENV || process.env.DEFAULT_EMBEDDING_MODEL_ENV || 'unknown',
+            baseURL: emb.baseURL || probe.baseURL || '',
+            dimensions: emb.dimensions || 1024,
+          },
+          autoCapture: true,
+          autoRecall: level !== 'lite-safe',
+          retrieval: {
+            mode: 'hybrid',
+            candidatePoolSize: 20,
+            minScore: 0.45,
+            hardMinScore: level === 'pro-rerank' ? 0.35 : 0.55,
+            rerank: 'none',
+            filterNoise: true,
+          },
+          sessionStrategy: 'systemSessionMemory',
+        };
 
-      // Jina 特有字段
-      if (emb.taskQuery) config.embedding.taskQuery = emb.taskQuery;
-      if (emb.taskPassage) config.embedding.taskPassage = emb.taskPassage;
-      if (emb.normalized) config.embedding.normalized = true;
+        if (emb.taskQuery) config.embedding.taskQuery = emb.taskQuery;
+        if (emb.taskPassage) config.embedding.taskPassage = emb.taskPassage;
+        if (emb.normalized) config.embedding.normalized = true;
 
-      // 等级特定
-      if (level !== 'lite-safe') {
-        config.autoRecallMinLength = 8;
-        config.autoRecallTopK = 3;
-        config.autoRecallExcludeReflection = true;
-        config.autoRecallMaxAgeDays = 30;
-        config.autoRecallMaxEntriesPerKey = 10;
+        if (level !== 'lite-safe') {
+          config.autoRecallMinLength = 8;
+          config.autoRecallTopK = 3;
+          config.autoRecallExcludeReflection = true;
+          config.autoRecallMaxAgeDays = 30;
+          config.autoRecallMaxEntriesPerKey = 10;
+        }
+
+        if (level === 'lite-safe') {
+          config.mdMirror = { enabled: true, dir: 'memory-md' };
+        }
+
+        const rr = probe.rerank || {};
+        const canUseConfiguredRerank =
+          !!configuredRerank.endpoint && !!configuredRerank.model;
+        if (level === 'pro-rerank' && (rr.available || canUseConfiguredRerank)) {
+          config.retrieval.rerank = 'cross-encoder';
+          config.retrieval.rerankApiKey =
+            rr.apiKey || configuredRerank.apiKey || emb.apiKey || '';
+          config.retrieval.rerankModel = rr.model || configuredRerank.model || '';
+          config.retrieval.rerankEndpoint =
+            rr.endpoint || configuredRerank.endpoint || '';
+          config.retrieval.rerankProvider =
+            rr.provider || configuredRerank.provider || 'jina';
+          config.retrieval.recencyHalfLifeDays = 14;
+          config.retrieval.recencyWeight = 0.1;
+        }
+
+        console.log(JSON.stringify(config, null, 2));
+      } catch (err) {
+        console.error('Invalid probe result: ' + err.message);
+        process.exit(1);
       }
-
-      if (level === 'lite-safe') {
-        config.mdMirror = { enabled: true, dir: 'memory-md' };
-      }
-
-      // rerank
-      const rr = probe.rerank || {};
-      if (level === 'pro-rerank' && rr.available) {
-        config.retrieval.rerank = 'cross-encoder';
-        config.retrieval.rerankApiKey = rr.apiKey || emb.apiKey || '';
-        config.retrieval.rerankModel = rr.model || '';
-        config.retrieval.rerankEndpoint = rr.endpoint || '';
-        config.retrieval.rerankProvider = rr.provider || 'jina';
-        config.retrieval.recencyHalfLifeDays = 14;
-        config.retrieval.recencyWeight = 0.1;
-      }
-
-      console.log(JSON.stringify(config, null, 2));
     "
   }
 
@@ -1235,24 +1471,26 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
     dry "从探测结果生成配置 / Generate $TEMPLATE config from probe result"
     CONFIG_JSON='{}'
   else
-    if [[ -s "${PROBE_RESULT:-}" ]]; then
+    if probe_result_is_valid "${PROBE_RESULT:-}"; then
       CONFIG_JSON=$(gen_config_from_probe "$PROBE_RESULT" "$TEMPLATE") || {
         warn "配置生成失败 / Config generation failed from probe result."
         CONFIG_JSON='{}'
       }
     else
-      # 没有探测结果（跳过了探测），用预设生成
-      warn "无探测结果，使用预设默认值 / No probe result, using preset defaults."
+      warn "探测结果无效或为空，使用预设默认值 / Probe result missing or invalid, using preset defaults."
       # 写一个临时探测结果
       PROBE_RESULT="$(mktemp "${TMPDIR:-/tmp}/memory-probe-XXXXXX")"
-  _TMPFILES+=("$PROBE_RESULT")
-      PROBE_RESULT_ENV="$PROBE_RESULT" API_BASE_URL_ENV="$API_BASE_URL" API_KEY_ENV="$API_KEY" EMBEDDING_MODEL_ENV="${EMBEDDING_MODEL:-unknown}" \
-        node -e "
+      _TMPFILES+=("$PROBE_RESULT")
+      FALLBACK_HAS_RERANK_ENV="false"
+      if [[ -n "${RERANK_ENDPOINT:-}" && -n "${RERANK_MODEL:-}" ]]; then
+        FALLBACK_HAS_RERANK_ENV="true"
+      fi
+      PROBE_RESULT_ENV="$PROBE_RESULT" API_BASE_URL_ENV="$API_BASE_URL" API_KEY_ENV="$API_KEY" EMBEDDING_MODEL_ENV="${EMBEDDING_MODEL:-}" DEFAULT_EMBEDDING_MODEL_ENV="${DEFAULT_EMBEDDING_MODEL:-}" RERANK_ENDPOINT_ENV="${RERANK_ENDPOINT:-}" RERANK_MODEL_ENV="${RERANK_MODEL:-}" RERANK_PROVIDER_ENV="${RERANK_PROVIDER:-jina}" RERANK_API_KEY_ENV="${RERANK_API_KEY:-$API_KEY}" FALLBACK_HAS_RERANK_ENV="$FALLBACK_HAS_RERANK_ENV" node -e "
         const result = {
           baseURL: process.env.API_BASE_URL_ENV,
           embedding: {
             available: true,
-            model: process.env.EMBEDDING_MODEL_ENV,
+            model: process.env.EMBEDDING_MODEL_ENV || process.env.DEFAULT_EMBEDDING_MODEL_ENV || 'unknown',
             dimensions: 1024,
             apiKey: process.env.API_KEY_ENV,
             baseURL: process.env.API_BASE_URL_ENV,
@@ -1260,7 +1498,14 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
             taskPassage: null,
             normalized: false,
           },
-          rerank: { available: false, reason: 'no probe data' },
+          rerank: {
+            available: process.env.FALLBACK_HAS_RERANK_ENV === 'true',
+            reason: 'no probe data',
+            model: process.env.RERANK_MODEL_ENV || '',
+            endpoint: process.env.RERANK_ENDPOINT_ENV || '',
+            provider: process.env.RERANK_PROVIDER_ENV || 'jina',
+            apiKey: process.env.RERANK_API_KEY_ENV || process.env.API_KEY_ENV || '',
+          },
         };
         require('fs').writeFileSync(process.env.PROBE_RESULT_ENV, JSON.stringify(result, null, 2));
       " || warn "临时探测文件写入失败 / Failed to write temp probe file."

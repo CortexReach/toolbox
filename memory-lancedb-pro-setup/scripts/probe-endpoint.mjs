@@ -104,14 +104,28 @@ if (!baseURL) {
 
 // ── 通用 fetch 封装 ──
 async function safeFetch(url, options = {}) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeout);
   try {
-    const res = await fetch(url, { ...options, signal: controller.signal });
-    clearTimeout(timer);
+    if (typeof fetch !== "function") {
+      return {
+        ok: false,
+        status: 0,
+        error: "global fetch unavailable; please upgrade Node.js to v18+",
+      };
+    }
+
+    const controller =
+      typeof AbortController === "function" ? new AbortController() : null;
+    const timer = controller
+      ? setTimeout(() => controller.abort(), timeout)
+      : null;
+    const res = await fetch(url, {
+      ...options,
+      ...(controller ? { signal: controller.signal } : {}),
+    });
+    if (timer) clearTimeout(timer);
     return res;
   } catch (err) {
-    clearTimeout(timer);
+    if (typeof timer !== "undefined" && timer) clearTimeout(timer);
     if (err.name === "AbortError") {
       return { ok: false, status: 0, error: `超时 (${timeout}ms)` };
     }
