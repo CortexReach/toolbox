@@ -393,7 +393,7 @@ detect_plugin_dir() {
     local registered
     registered=$(jq -r '.plugins.load.paths[]? // empty' "$oc_json" 2>/dev/null \
       | while IFS= read -r p; do
-          # 展开 ~ 开头的路径（纯参数替换，避免命令注入）
+          # 展开 ~ 开头的路径（不用 eval，避免命令注入 / tilde-expand only, no eval to avoid injection）
           p="${p/#\~/$HOME}"
           if [[ -f "$p/package.json" ]] && grep -q '"memory-lancedb-pro"' "$p/package.json" 2>/dev/null; then
             echo "$p"
@@ -655,16 +655,16 @@ UPGRADE_DONE=false
 
 if [[ -d "$PLUGIN_DIR" && -f "$PLUGIN_DIR/package.json" ]]; then
   FRESH_INSTALL=false
-  LOCAL_VER=$(P_DIR="$PLUGIN_DIR" node -e "console.log(require(process.env.P_DIR+'/package.json').version)" 2>/dev/null || echo "unknown")
+  LOCAL_VER=$(PLUGIN_DIR_ENV="$PLUGIN_DIR" node -e "console.log(require(process.env.PLUGIN_DIR_ENV+'/package.json').version)" 2>/dev/null || echo "unknown")
   success "检测到已安装版本 / Installed version: v$LOCAL_VER"
   info "插件路径 / Plugin path: $PLUGIN_DIR"
 
   # 检查配置是否完整（插件目录在但 openclaw.json 里没注册）
   CONFIG_MISSING=false
   if [[ -f "$OPENCLAW_JSON" ]]; then
-    HAS_ENTRY=$(OC_JSON="$OPENCLAW_JSON" node -e "
+    HAS_ENTRY=$(OC_JSON_ENV="$OPENCLAW_JSON" node -e "
       try {
-        const d = JSON.parse(require('fs').readFileSync(process.env.OC_JSON,'utf8'));
+        const d = JSON.parse(require('fs').readFileSync(process.env.OC_JSON_ENV,'utf8'));
         const e = d?.plugins?.entries?.['memory-lancedb-pro'];
         process.stdout.write(e ? 'yes' : 'no');
       } catch(e) { process.stdout.write('no'); }
@@ -1166,68 +1166,99 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
   echo ""
   info "第 7 步：生成配置 / Generating config from probe result..."
 
+  probe_result_is_valid() {
+    local f="${1:-}"
+    [[ -n "$f" ]] && [[ -s "$f" ]] && node -e "
+      const fs = require('fs');
+      try {
+        const d = JSON.parse(fs.readFileSync(process.env.F, 'utf8'));
+        if (!d || typeof d !== 'object') process.exit(1);
+        process.exit(0);
+      } catch { process.exit(1); }
+    " F="$f" 2>/dev/null
+  }
+
   gen_config_from_probe() {
     local PROBE_FILE="$1"
     local LEVEL="$2"
 
-    PROBE_FILE_ENV="$PROBE_FILE" LEVEL_ENV="$LEVEL" node -e "
+    PROBE_FILE_ENV="$PROBE_FILE" LEVEL_ENV="$LEVEL" \
+      RERANK_ENDPOINT_ENV="${RERANK_ENDPOINT:-}" \
+      RERANK_MODEL_ENV="${RERANK_MODEL:-}" \
+      RERANK_PROVIDER_ENV="${RERANK_PROVIDER:-jina}" \
+      RERANK_API_KEY_ENV="${RERANK_API_KEY:-$API_KEY}" \
+      EMBEDDING_MODEL_ENV="${EMBEDDING_MODEL:-${DEFAULT_EMBEDDING_MODEL:-unknown}}" \
+      node -e "
       const fs = require('fs');
-      const probe = JSON.parse(fs.readFileSync(process.env.PROBE_FILE_ENV, 'utf8'));
-      const level = process.env.LEVEL_ENV;
+      try {
+        const probe = JSON.parse(fs.readFileSync(process.env.PROBE_FILE_ENV, 'utf8'));
+        const level = process.env.LEVEL_ENV;
+        const configuredRerank = {
+          endpoint: process.env.RERANK_ENDPOINT_ENV || '',
+          model: process.env.RERANK_MODEL_ENV || '',
+          provider: process.env.RERANK_PROVIDER_ENV || 'jina',
+          apiKey: process.env.RERANK_API_KEY_ENV || '',
+        };
 
-      const emb = probe.embedding || {};
+        const emb = probe.embedding || {};
 
-      const config = {
-        embedding: {
-          apiKey: emb.apiKey || 'YOUR_API_KEY',
-          model: emb.model || 'unknown',
-          baseURL: emb.baseURL || probe.baseURL || '',
-          dimensions: emb.dimensions || 1024,
-        },
-        autoCapture: true,
-        autoRecall: level !== 'lite-safe',
-        retrieval: {
-          mode: 'hybrid',
-          candidatePoolSize: 20,
-          minScore: 0.45,
-          hardMinScore: level === 'pro-rerank' ? 0.35 : 0.55,
-          rerank: 'none',
-          filterNoise: true,
-        },
-        sessionStrategy: 'systemSessionMemory',
-      };
+        const config = {
+          embedding: {
+            apiKey: emb.apiKey || 'YOUR_API_KEY',
+            model: emb.model || process.env.EMBEDDING_MODEL_ENV || 'unknown',
+            baseURL: emb.baseURL || probe.baseURL || '',
+            dimensions: emb.dimensions || 1024,
+          },
+          autoCapture: true,
+          autoRecall: level !== 'lite-safe',
+          retrieval: {
+            mode: 'hybrid',
+            candidatePoolSize: 20,
+            minScore: 0.45,
+            hardMinScore: level === 'pro-rerank' ? 0.35 : 0.55,
+            rerank: 'none',
+            filterNoise: true,
+          },
+          sessionStrategy: 'systemSessionMemory',
+        };
 
-      // Jina 特有字段
-      if (emb.taskQuery) config.embedding.taskQuery = emb.taskQuery;
-      if (emb.taskPassage) config.embedding.taskPassage = emb.taskPassage;
-      if (emb.normalized) config.embedding.normalized = true;
+        if (emb.taskQuery) config.embedding.taskQuery = emb.taskQuery;
+        if (emb.taskPassage) config.embedding.taskPassage = emb.taskPassage;
+        if (emb.normalized) config.embedding.normalized = true;
 
-      // 等级特定
-      if (level !== 'lite-safe') {
-        config.autoRecallMinLength = 8;
-        config.autoRecallTopK = 3;
-        config.autoRecallExcludeReflection = true;
-        config.autoRecallMaxAgeDays = 30;
-        config.autoRecallMaxEntriesPerKey = 10;
+        if (level !== 'lite-safe') {
+          config.autoRecallMinLength = 8;
+          config.autoRecallTopK = 3;
+          config.autoRecallExcludeReflection = true;
+          config.autoRecallMaxAgeDays = 30;
+          config.autoRecallMaxEntriesPerKey = 10;
+        }
+
+        if (level === 'lite-safe') {
+          config.mdMirror = { enabled: true, dir: 'memory-md' };
+        }
+
+        const rr = probe.rerank || {};
+        const canUseConfiguredRerank =
+          !!configuredRerank.endpoint && !!configuredRerank.model;
+        if (level === 'pro-rerank' && (rr.available || canUseConfiguredRerank)) {
+          config.retrieval.rerank = 'cross-encoder';
+          config.retrieval.rerankApiKey =
+            rr.apiKey || configuredRerank.apiKey || emb.apiKey || '';
+          config.retrieval.rerankModel = rr.model || configuredRerank.model || '';
+          config.retrieval.rerankEndpoint =
+            rr.endpoint || configuredRerank.endpoint || '';
+          config.retrieval.rerankProvider =
+            rr.provider || configuredRerank.provider || 'jina';
+          config.retrieval.recencyHalfLifeDays = 14;
+          config.retrieval.recencyWeight = 0.1;
+        }
+
+        console.log(JSON.stringify(config, null, 2));
+      } catch (err) {
+        console.error('Invalid probe result: ' + err.message);
+        process.exit(1);
       }
-
-      if (level === 'lite-safe') {
-        config.mdMirror = { enabled: true, dir: 'memory-md' };
-      }
-
-      // rerank
-      const rr = probe.rerank || {};
-      if (level === 'pro-rerank' && rr.available) {
-        config.retrieval.rerank = 'cross-encoder';
-        config.retrieval.rerankApiKey = rr.apiKey || emb.apiKey || '';
-        config.retrieval.rerankModel = rr.model || '';
-        config.retrieval.rerankEndpoint = rr.endpoint || '';
-        config.retrieval.rerankProvider = rr.provider || 'jina';
-        config.retrieval.recencyHalfLifeDays = 14;
-        config.retrieval.recencyWeight = 0.1;
-      }
-
-      console.log(JSON.stringify(config, null, 2));
     "
   }
 
@@ -1235,18 +1266,23 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
     dry "从探测结果生成配置 / Generate $TEMPLATE config from probe result"
     CONFIG_JSON='{}'
   else
-    if [[ -s "${PROBE_RESULT:-}" ]]; then
+    if probe_result_is_valid "${PROBE_RESULT:-}"; then
       CONFIG_JSON=$(gen_config_from_probe "$PROBE_RESULT" "$TEMPLATE") || {
         warn "配置生成失败 / Config generation failed from probe result."
         CONFIG_JSON='{}'
       }
     else
       # 没有探测结果（跳过了探测），用预设生成
-      warn "无探测结果，使用预设默认值 / No probe result, using preset defaults."
+      warn "探测结果无效或为空，使用预设默认值 / Probe result missing or invalid, using preset defaults."
       # 写一个临时探测结果
       PROBE_RESULT="$(mktemp "${TMPDIR:-/tmp}/memory-probe-XXXXXX")"
-  _TMPFILES+=("$PROBE_RESULT")
-      PROBE_RESULT_ENV="$PROBE_RESULT" API_BASE_URL_ENV="$API_BASE_URL" API_KEY_ENV="$API_KEY" EMBEDDING_MODEL_ENV="${EMBEDDING_MODEL:-unknown}" \
+      _TMPFILES+=("$PROBE_RESULT")
+      HAS_RERANK_ENV="$( [[ -n "${RERANK_ENDPOINT:-}" ]] && [[ -n "${RERANK_MODEL:-}" ]] && echo true || echo false )" \
+        RERANK_MODEL_ENV="${RERANK_MODEL:-}" \
+        RERANK_ENDPOINT_ENV="${RERANK_ENDPOINT:-}" \
+        RERANK_PROVIDER_ENV="${RERANK_PROVIDER:-jina}" \
+        RERANK_API_KEY_ENV="${RERANK_API_KEY:-$API_KEY}" \
+        PROBE_RESULT_ENV="$PROBE_RESULT" API_BASE_URL_ENV="$API_BASE_URL" API_KEY_ENV="$API_KEY" EMBEDDING_MODEL_ENV="${EMBEDDING_MODEL:-unknown}" \
         node -e "
         const result = {
           baseURL: process.env.API_BASE_URL_ENV,
@@ -1260,7 +1296,14 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
             taskPassage: null,
             normalized: false,
           },
-          rerank: { available: false, reason: 'no probe data' },
+          rerank: {
+            available: process.env.HAS_RERANK_ENV === 'true',
+            reason: 'no probe data',
+            model: process.env.RERANK_MODEL_ENV || '',
+            endpoint: process.env.RERANK_ENDPOINT_ENV || '',
+            provider: process.env.RERANK_PROVIDER_ENV || 'jina',
+            apiKey: process.env.RERANK_API_KEY_ENV || '',
+          },
         };
         require('fs').writeFileSync(process.env.PROBE_RESULT_ENV, JSON.stringify(result, null, 2));
       " || warn "临时探测文件写入失败 / Failed to write temp probe file."
@@ -1754,14 +1797,14 @@ if [[ "$PASS" -eq "$TOTAL" ]] && ! $DRY_RUN; then
             rerank)
               RERANK_KEY_VAL=$(jq -r "$CFG_PATH.embedding.apiKey // \"\"" "$OPENCLAW_JSON" 2>/dev/null)
               EMBED_BASE_URL=$(jq -r "$CFG_PATH.embedding.baseURL // \"\"" "$OPENCLAW_JSON" 2>/dev/null)
-              # 根据 embedding provider 自动检测 rerank 端点
+              # 根据 embedding provider 确定 rerank 端点 / Detect rerank endpoint from embedding provider
               RERANK_EP="https://api.jina.ai/v1/rerank"
               RERANK_MDL="jina-reranker-v3"
               RERANK_PROV="jina"
               if [[ "$EMBED_BASE_URL" == *"dashscope"* ]]; then
                 RERANK_EP="https://dashscope.aliyuncs.com/compatible-api/v1/reranks"
                 RERANK_MDL="qwen3-rerank"
-                RERANK_PROV="jina"  # DashScope compatible-api 响应格式兼容 Jina
+                RERANK_PROV="jina"  # DashScope rerank 响应格式兼容 Jina / DashScope rerank is Jina-compatible
               fi
               # Ollama / 本地模型没有在线 rerank 能力
               if [[ "$RERANK_KEY_VAL" == "ollama" || "$EMBED_BASE_URL" == *"localhost:11434"* || "$EMBED_BASE_URL" == *"127.0.0.1:11434"* ]]; then
@@ -1779,20 +1822,21 @@ if [[ "$PASS" -eq "$TOTAL" ]] && ! $DRY_RUN; then
                 warn "rerank 需要 API Key，请先配置 / Rerank requires API Key"
                 continue
               fi
-              # 用 --arg 传递变量，避免特殊字符注入 jq 表达式
+              # 使用 --arg 传递 API key，避免特殊字符注入 jq 表达式
+              # Pass API key via --arg to avoid special-char injection in jq expression
               if jq_safe_write \
                 --arg rkey "$RERANK_KEY_VAL" \
-                --arg rep "$RERANK_EP" \
+                --arg rep  "$RERANK_EP" \
                 --arg rmdl "$RERANK_MDL" \
                 --arg rprov "$RERANK_PROV" \
                 "
-                $CFG_PATH.retrieval.rerank = \"cross-encoder\" |
-                $CFG_PATH.retrieval.rerankApiKey = \$rkey |
-                $CFG_PATH.retrieval.rerankModel = \$rmdl |
-                $CFG_PATH.retrieval.rerankEndpoint = \$rep |
-                $CFG_PATH.retrieval.rerankProvider = \$rprov |
-                $CFG_PATH.retrieval.hardMinScore = 0.35
-              " "$OPENCLAW_JSON"; then
+                  $CFG_PATH.retrieval.rerank = \"cross-encoder\" |
+                  $CFG_PATH.retrieval.rerankApiKey = \$rkey |
+                  $CFG_PATH.retrieval.rerankModel = \$rmdl |
+                  $CFG_PATH.retrieval.rerankEndpoint = \$rep |
+                  $CFG_PATH.retrieval.rerankProvider = \$rprov |
+                  $CFG_PATH.retrieval.hardMinScore = 0.35
+                " "$OPENCLAW_JSON"; then
                 success "rerank enabled / 已开启精排"
                 NEED_RESTART=true
               else
