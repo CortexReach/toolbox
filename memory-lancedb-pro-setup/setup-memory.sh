@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-#  memory-lancedb-pro 一键安装 / 升级脚本 v3.5
+#  memory-lancedb-pro 一键安装 / 升级脚本 v3.6
 #
 #  用法：
 #    bash setup-memory.sh            # 安装（已安装则进入升级模式）
@@ -9,6 +9,15 @@
 #    bash setup-memory.sh --selfcheck-only  # 只跑能力自检，不改配置
 #    bash setup-memory.sh --uninstall # 还原配置并移除插件
 #    bash setup-memory.sh --ref v1.2.0  # 锁定到指定 tag/branch/commit
+#
+#  v3.6 变化（合并 PR #3 by robinspt + 安全加固）：
+#    - 单文件运行时自动下载缺失的 helper scripts（probe/selfcheck/validate）
+#    - uninstall 改为精确删除配置字段，不再依赖备份恢复
+#    - probe_result_is_valid() 校验文件非空 + JSON 合法
+#    - provider 补齐默认 embedding 模型（Jina/DashScope/SiliconFlow/OpenAI/Ollama）
+#    - rerank 兜底：预设 provider 有配置时即使 probe 未验证也允许写入
+#    - Node.js >= 18 版本校验、probe stderr 不再吞掉
+#    - gen_config_from_probe 全面改用环境变量（对齐 v3.4 安全修复）
 #
 #  v3.5 变化：
 #    - 修复 Ollama 等 probe 失败时 config 丢失 embedding 字段的 bug（#2）
@@ -109,7 +118,7 @@ dry()     { echo -e "${YELLOW}[DRY-RUN]${NC} 将会执行 / Would run: $1"; }
 
 echo ""
 echo -e "${BOLD}========================================${NC}"
-echo -e "${BOLD}  memory-lancedb-pro 安装/升级向导 / Setup Wizard v3.5${NC}"
+echo -e "${BOLD}  memory-lancedb-pro 安装/升级向导 / Setup Wizard v3.6${NC}"
 echo -e "${BOLD}========================================${NC}"
 if $DRY_RUN; then
   echo -e "${YELLOW}  ⚡ DRY-RUN 模式：只展示操作，不实际执行 / Show actions only, no changes${NC}"
