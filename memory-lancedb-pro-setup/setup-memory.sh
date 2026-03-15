@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-#  memory-lancedb-pro 一键安装 / 升级脚本 v3.4
+#  memory-lancedb-pro 一键安装 / 升级脚本 v3.5
 #
 #  用法：
 #    bash setup-memory.sh            # 安装（已安装则进入升级模式）
@@ -9,6 +9,12 @@
 #    bash setup-memory.sh --selfcheck-only  # 只跑能力自检，不改配置
 #    bash setup-memory.sh --uninstall # 还原配置并移除插件
 #    bash setup-memory.sh --ref v1.2.0  # 锁定到指定 tag/branch/commit
+#
+#  v3.5 变化：
+#    - 修复 Ollama 等 probe 失败时 config 丢失 embedding 字段的 bug（#2）
+#    - probe 失败后立即用已收集变量生成兜底探测结果，不再留空文件给下游
+#    - -f 改 -s 检测探测结果文件非空，双重保险
+#    - gen_config_from_probe 里 node -e 改用环境变量（对齐 v3.4 安全修复）
 #
 #  v3.4 变化：
 #    - 新增 plugins.allow 白名单（修复 git-clone 插件 "plugin not found"）
@@ -103,7 +109,7 @@ dry()     { echo -e "${YELLOW}[DRY-RUN]${NC} 将会执行 / Would run: $1"; }
 
 echo ""
 echo -e "${BOLD}========================================${NC}"
-echo -e "${BOLD}  memory-lancedb-pro 安装/升级向导 / Setup Wizard v3.4${NC}"
+echo -e "${BOLD}  memory-lancedb-pro 安装/升级向导 / Setup Wizard v3.5${NC}"
 echo -e "${BOLD}========================================${NC}"
 if $DRY_RUN; then
   echo -e "${YELLOW}  ⚡ DRY-RUN 模式：只展示操作，不实际执行 / Show actions only, no changes${NC}"
@@ -1083,6 +1089,26 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
       if $SELFCHECK_ONLY; then
         fail "--selfcheck-only 模式下探测失败 / Probe failed in selfcheck-only mode."
       fi
+      # 探测失败时用已收集的变量生成兜底探测结果，防止下游读到空文件
+      # Generate fallback probe result from collected variables so downstream doesn't read empty file
+      PROBE_RESULT_ENV="$PROBE_RESULT" API_BASE_URL_ENV="$API_BASE_URL" API_KEY_ENV="$API_KEY" EMBEDDING_MODEL_ENV="${EMBEDDING_MODEL:-unknown}" \
+        node -e "
+          const result = {
+            baseURL: process.env.API_BASE_URL_ENV,
+            embedding: {
+              available: true,
+              model: process.env.EMBEDDING_MODEL_ENV,
+              dimensions: 1024,
+              apiKey: process.env.API_KEY_ENV,
+              baseURL: process.env.API_BASE_URL_ENV,
+              taskQuery: null,
+              taskPassage: null,
+              normalized: false,
+            },
+            rerank: { available: false, reason: 'probe failed, using fallback' },
+          };
+          require('fs').writeFileSync(process.env.PROBE_RESULT_ENV, JSON.stringify(result, null, 2));
+        " 2>/dev/null || true
     fi
   fi
 
@@ -1144,10 +1170,10 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
     local PROBE_FILE="$1"
     local LEVEL="$2"
 
-    node -e "
+    PROBE_FILE_ENV="$PROBE_FILE" LEVEL_ENV="$LEVEL" node -e "
       const fs = require('fs');
-      const probe = JSON.parse(fs.readFileSync('$PROBE_FILE', 'utf8'));
-      const level = '$LEVEL';
+      const probe = JSON.parse(fs.readFileSync(process.env.PROBE_FILE_ENV, 'utf8'));
+      const level = process.env.LEVEL_ENV;
 
       const emb = probe.embedding || {};
 
@@ -1209,7 +1235,7 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
     dry "从探测结果生成配置 / Generate $TEMPLATE config from probe result"
     CONFIG_JSON='{}'
   else
-    if [[ -f "${PROBE_RESULT:-}" ]]; then
+    if [[ -s "${PROBE_RESULT:-}" ]]; then
       CONFIG_JSON=$(gen_config_from_probe "$PROBE_RESULT" "$TEMPLATE") || {
         warn "配置生成失败 / Config generation failed from probe result."
         CONFIG_JSON='{}'
@@ -1220,22 +1246,23 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
       # 写一个临时探测结果
       PROBE_RESULT="$(mktemp "${TMPDIR:-/tmp}/memory-probe-XXXXXX")"
   _TMPFILES+=("$PROBE_RESULT")
-      node -e "
+      PROBE_RESULT_ENV="$PROBE_RESULT" API_BASE_URL_ENV="$API_BASE_URL" API_KEY_ENV="$API_KEY" EMBEDDING_MODEL_ENV="${EMBEDDING_MODEL:-unknown}" \
+        node -e "
         const result = {
-          baseURL: '$API_BASE_URL',
+          baseURL: process.env.API_BASE_URL_ENV,
           embedding: {
             available: true,
-            model: '${EMBEDDING_MODEL:-unknown}',
+            model: process.env.EMBEDDING_MODEL_ENV,
             dimensions: 1024,
-            apiKey: '$API_KEY',
-            baseURL: '$API_BASE_URL',
+            apiKey: process.env.API_KEY_ENV,
+            baseURL: process.env.API_BASE_URL_ENV,
             taskQuery: null,
             taskPassage: null,
             normalized: false,
           },
           rerank: { available: false, reason: 'no probe data' },
         };
-        require('fs').writeFileSync('$PROBE_RESULT', JSON.stringify(result, null, 2));
+        require('fs').writeFileSync(process.env.PROBE_RESULT_ENV, JSON.stringify(result, null, 2));
       " || warn "临时探测文件写入失败 / Failed to write temp probe file."
       CONFIG_JSON=$(gen_config_from_probe "$PROBE_RESULT" "$TEMPLATE") || {
         warn "配置生成失败 / Config generation failed."
