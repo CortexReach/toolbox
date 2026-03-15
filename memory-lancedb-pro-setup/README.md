@@ -110,6 +110,15 @@ bash setup-memory.sh
 - Add `plugins.allow` whitelist to fix "plugin not found" for git-cloned plugins
 - Auto-detect DashScope rerank endpoint when DashScope is the embedding provider
 - Branch detection: `git fetch --prune` before detecting, fallback hardcoded to `master`
+- Fix: version display now reads from actual git target branch (was showing stale tag)
+- Fix: changelog filters out beta versions when not in `--beta` mode; auto-includes beta when target is beta
+- Fix: Gateway restart false positive — detect `disabled`/`unavailable` in output for container environments
+- Fix: `PLUGIN_MANIFEST` unbound variable crash on upgrade path
+- Fix: `filter_config_by_schema` moved to global scope (was only defined in fresh-install block, breaking upgrade-path schema filter)
+- Fix: `git stash` before checkout to prevent `package-lock.json` local changes from blocking branch switch
+- New: auto-repair invalid config fields on startup (breaks crash loops caused by unsupported fields)
+- New: prominent jq warning with opt-out — lists impact of missing jq, default exits to install first
+- New: `schema_has_field` guard — optional feature toggles only offer options supported by current plugin schema
 
 ### v3.3 (2026-03-14)
 - Fix: run schema filter again before gateway restart after optional feature toggles (autoRecall/reflection/rerank/mdMirror wrote fields that bypassed the v3.1 initial filter)

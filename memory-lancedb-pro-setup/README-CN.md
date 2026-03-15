@@ -110,6 +110,15 @@ bash setup-memory.sh
 - 新增 `plugins.allow` 白名单（修复 git-clone 插件 "plugin not found"）
 - DashScope embedding 用户自动检测 rerank 端点（qwen3-rerank）
 - 分支检测优化：`git fetch --prune` 清理残留远程分支，fallback 硬编码 `master`
+- 修复：版本展示从 git 远程分支读真实版本（之前 tags API 和实际安装版本不一致）
+- 修复：changelog 非 beta 模式过滤 beta 版本；目标版本是 beta 时自动包含 beta
+- 修复：Gateway 重启假阳性——检测输出中的 `disabled`/`unavailable`，容器环境正确提示
+- 修复：升级路径 `PLUGIN_MANIFEST` 未定义导致崩溃
+- 修复：`filter_config_by_schema` 提到全局作用域（之前只在全新安装块里定义，升级路径 schema 过滤失效）
+- 修复：checkout 前 `git stash`，防止 `package-lock.json` 本地改动挡住分支切换
+- 新增：启动时自动修复非法配置字段（打破 additional properties 导致的重启循环）
+- 新增：无 jq 强提示——列出影响，默认退出引导安装 jq
+- 新增：`schema_has_field` 守门——可选功能只展示当前插件 schema 支持的选项
 
 ### v3.3（2026-03-14）
 - 修复：可选功能（autoRecall/reflection/rerank/mdMirror）写入后、Gateway 重启前再跑一次 schema 过滤，防止绕过 v3.1 的初始过滤
