@@ -895,26 +895,36 @@ if $FRESH_INSTALL || ${CONFIG_MISSING:-false}; then
 
     ollama)
       echo ""
-      info "检测 Ollama 服务 / Detecting Ollama service..."
+      # 允许用户自定义 Ollama 地址 / Allow custom Ollama host
+      read -p "  Ollama 地址 / Ollama host (默认 / default: localhost:11434): " OLLAMA_HOST_INPUT
+      OLLAMA_HOST="${OLLAMA_HOST_INPUT:-localhost:11434}"
+      # 补全协议前缀 / Ensure http:// prefix
+      if [[ "$OLLAMA_HOST" != http://* && "$OLLAMA_HOST" != https://* ]]; then
+        OLLAMA_HOST="http://${OLLAMA_HOST}"
+      fi
+      # 去掉尾部斜杠 / Strip trailing slash
+      OLLAMA_HOST="${OLLAMA_HOST%/}"
+
+      info "检测 Ollama 服务 / Detecting Ollama service at ${OLLAMA_HOST}..."
 
       # 检测 Ollama 是否运行
       OLLAMA_RUNNING=false
-      if curl -s --max-time 3 http://localhost:11434/api/version >/dev/null 2>&1; then
+      if curl -s --max-time 3 "${OLLAMA_HOST}/api/version" >/dev/null 2>&1; then
         OLLAMA_RUNNING=true
         success "Ollama 服务正在运行 / Ollama service is running"
-      elif command -v ollama &>/dev/null; then
+      elif [[ "$OLLAMA_HOST" == *"localhost"* || "$OLLAMA_HOST" == *"127.0.0.1"* ]] && command -v ollama &>/dev/null; then
         warn "Ollama 已安装但未运行 / Ollama installed but not running. Run 'ollama serve' first."
         read -p "  已启动 Ollama？按回车继续 / Ollama running? Press Enter to continue, Ctrl+C to exit: "
-        if curl -s --max-time 3 http://localhost:11434/api/version >/dev/null 2>&1; then
+        if curl -s --max-time 3 "${OLLAMA_HOST}/api/version" >/dev/null 2>&1; then
           OLLAMA_RUNNING=true
         else
-          fail "Ollama 服务仍未响应 / Ollama still not responding. Start Ollama and re-run this script."
+          fail "Ollama 服务仍未响应 / Ollama still not responding at ${OLLAMA_HOST}."
         fi
       else
-        fail "找不到 Ollama / Ollama not found. Install: https://ollama.com/"
+        fail "无法连接 Ollama / Cannot reach Ollama at ${OLLAMA_HOST}. Check the address and try again."
       fi
 
-      API_BASE_URL="http://localhost:11434/v1"
+      API_BASE_URL="${OLLAMA_HOST}/v1"
       API_KEY="ollama"
 
       # 列出本地 embedding 模型
@@ -1816,7 +1826,7 @@ if [[ "$PASS" -eq "$TOTAL" ]] && ! $DRY_RUN; then
                 RERANK_PROV="jina"  # DashScope rerank 响应格式兼容 Jina / DashScope rerank is Jina-compatible
               fi
               # Ollama / 本地模型没有在线 rerank 能力
-              if [[ "$RERANK_KEY_VAL" == "ollama" || "$EMBED_BASE_URL" == *"localhost:11434"* || "$EMBED_BASE_URL" == *"127.0.0.1:11434"* ]]; then
+              if [[ "$RERANK_KEY_VAL" == "ollama" || "$EMBED_BASE_URL" == *":11434"* ]]; then
                 warn "rerank 需要在线 API（如 Jina），Ollama 本地模型不支持 / Rerank requires an online API (e.g. Jina). Ollama doesn't support rerank."
                 echo "    如需使用 rerank，请先注册 Jina（免费）获取 API Key / To use rerank, get a free Jina API Key: https://jina.ai/"
                 echo ""
